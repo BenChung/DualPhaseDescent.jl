@@ -1,0 +1,13 @@
+name = "SCP"
+uuid = "ac1f5b72-f7c1-4a71-abfc-b480bd05ceec"
+authors = ["Ben Chung <ckfinite@gmail.com> and contributors"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

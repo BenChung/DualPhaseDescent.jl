@@ -1,6 +1,6 @@
 #module SCP
 using LinearAlgebra
-using DifferentialEquations
+using OrdinaryDiffEq
 using ModelingToolkit, Symbolics
 using SciMLSensitivity, SymbolicIndexingInterface, SciMLStructures
 using ForwardDiff, ComponentArrays, DiffResults, RuntimeGeneratedFunctions
@@ -17,7 +17,7 @@ ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, b, c, d) =
         output = RealOutput()
     end
     eqs = [
-        output.u ~ ModelingToolkitStandardLibrary.Blocks.get_sampled_data(t, vals, dt, false)
+        output.u ~ ifelse(t < dt*N, ModelingToolkitStandardLibrary.Blocks.get_sampled_data(t, vals, dt, false), vals[end])
     ]
     return ODESystem(eqs, t, [], params; name, systems, continuous_events = [t % dt ~ 0])
 end
@@ -25,6 +25,7 @@ end
 @mtkmodel DblInt begin
     @parameters begin
         m, [tunable = false]
+        τ = 1.0, [tunable = false]
     end
     @variables begin
         f(t)
@@ -32,8 +33,8 @@ end
         v(t)
     end
     @equations begin
-        D(v) ~ f / m
-        D(x) ~ v
+        D(v) ~ τ * f / m
+        D(x) ~ τ * v
     end
 end
 
@@ -49,177 +50,216 @@ end
 sys = build_example_problem()
 
 RuntimeGeneratedFunctions.init(@__MODULE__)
-function trajopt(
-    sys, tspan, N, given_params, initial_guess,
-    ic, running_cost, terminal_cost, 
-    g, h, Ph
-)
-    t = sys.iv
-    (ti, tf) = tspan
-    dtime = tf - ti
-    augmenting_vars = ModelingToolkit.@variables begin
-        l(t)=0
-        y(t)=0
-    end
-    eqs = [
-        D(l) ~ running_cost,
-        D(y) ~ sum(max.(0.0, g) .^ 2) + sum(h .^ 2)
-    ]
-    augmented_system = ODESystem(eqs, t, systems=[sys], name=:augmented_system)
-    tsys = structural_simplify(augmented_system)
-    terminal_cost_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, terminal_cost))
-    terminal_cstr_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, Ph))
-    params = ModelingToolkit.MTKParameters(tsys, given_params)
-    tunable, repack, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
-    upd_start = setu(tsys, unknowns(tsys))
-
-    get_cost = getu(tsys, tsys.l)
-    upd_cost = setu(tsys, tsys.l)
-
-    iguess = ModelingToolkit.varmap_to_vars(initial_guess, unknowns(tsys); defaults=Dict(unknowns(tsys) .=> (zeros(N), )), promotetoconcrete=false)
-    iguess = collect(reduce(hcat, iguess)')
-    base_prob = ODEProblem(tsys, unknowns(tsys) .=> iguess[:, 1], (0.0, 1.0), given_params; dtmax = 0.01)
-    nunk = length(unknowns(tsys))
-
-    function linearize(inp)
-        neltype = eltype(inp)
-        params_ = SciMLStructures.replace(SciMLStructures.Tunable(), params, inp.params)
-        function segment(prob, i, repeat)
-            nu0 = neltype.(prob.u0)
-            upd_start(nu0, inp.u0[:, i])
-            return remake(prob, u0=nu0, p=params_, tspan=((i-1)/(N-1), (i)/(N-1)) .* dtime .+ ti)
+begin
+    function trajopt(
+        sys, tspan, N, given_params, initial_guess,
+        ic, running_cost, terminal_cost, 
+        g, h, Ph
+    )
+        t = sys.iv
+        (ti, tf) = tspan
+        dtime = tf - ti
+        augmenting_vars = ModelingToolkit.@variables begin
+            l(t)=0
+            y(t)=0
         end
-        ensemble = EnsembleProblem(base_prob, prob_func=segment, safetycopy=false)
-        sim = solve(ensemble, Tsit5(), trajectories=N-1)
-        final_state = collect(sim[end].u[end]) 
-        upd_cost(final_state, get_cost(final_state) + terminal_cost_fun(sim[end].u, params, sim[end].t))
-        terminal_cstr_value = terminal_cstr_fun(final_state, params, sim[end].t)
-        #@show terminal_cstr_value
-        return [reduce(vcat, map(s->s.u[end], sim[1:end-1])); final_state; terminal_cstr_value]
-    end
+        eqs = [
+            D(l) ~ running_cost,
+            D(y) ~ sum(max.(0.0, g) .^ 2) + sum(h .^ 2)
+        ]
+        augmented_system = ODESystem(eqs, t, systems=[sys], name=:augmented_system)
+        tsys = structural_simplify(augmented_system)
+        terminal_cost_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, terminal_cost))
+        terminal_cstr_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, Ph))
+        params = ModelingToolkit.MTKParameters(tsys, given_params)
+        tunable, repack, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
+        upd_start = setu(tsys, unknowns(tsys))
 
-    function linearize(states, pars)
-        linpoint = ComponentArray(u0=states, params=pars)
-        res = DiffResults.JacobianResult(zeros(nunk * (N-1) + 1), linpoint);
-        ForwardDiff.jacobian!(res, linearize, linpoint)
-        return res
-    end
+        get_cost = getu(tsys, tsys.l)
+        upd_cost = setu(tsys, tsys.l)
 
-    tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0, y => 0.0]))
-    xref = iguess
-    uref = tunable
-    uhist = []
-    xhist = []
-    whist = []
-    costs = []
-    rcosts = []
-    nparams = length(tunable)
-    res = linearize(xref[:, 1:N-1], uref)
+        iguess = ModelingToolkit.varmap_to_vars(initial_guess, unknowns(tsys); defaults=Dict(unknowns(tsys) .=> (zeros(N), )), promotetoconcrete=false)
+        iguess = collect(reduce(hcat, iguess)')
+        base_prob = ODEProblem(tsys, unknowns(tsys) .=> iguess[:, 1], (0.0, 1.0), given_params; dtmax = 0.01)
+        nunk = length(unknowns(tsys))
 
-    r = 1.0
-    β = 2.0
-    α = 2.0
-    ρ₀ = 0.0
-    ρ₁ = 0.25
-    ρ₂ = 0.7
+        function linearize(inp)
+            neltype = eltype(inp)
+            params_ = SciMLStructures.replace(SciMLStructures.Tunable(), params, inp.params)
+            function segment(prob, i, repeat)
+                nu0 = neltype.(prob.u0)
+                upd_start(nu0, inp.u0[:, i])
+                return remake(prob, u0=nu0, p=params_, tspan=((i-1)/(N-1), (i)/(N-1)) .* dtime .+ ti)
+            end
+            ensemble = EnsembleProblem(base_prob, prob_func=segment, safetycopy=false)
+            sim = solve(ensemble, Tsit5(), trajectories=N-1)
+            final_state = collect(sim[end].u[end]) 
+            upd_cost(final_state, get_cost(final_state) + terminal_cost_fun(inp.u0[:,N], params, sim[end].t))
+            terminal_cstr_value = terminal_cstr_fun(inp.u0[:,N], params, sim[end].t)
+            #@show terminal_cstr_value
+            return [reduce(vcat, map(s->s.u[end], sim[1:end-1])); final_state; terminal_cstr_value]
+        end
 
-    last_cost = 0#abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
-    for i=1:20
+        function linearize(states, pars)
+            linpoint = ComponentArray(u0=collect(states), params=collect(pars))
+            res = DiffResults.JacobianResult(zeros(nunk * (N-1) + 1), linpoint);
+            ForwardDiff.jacobian!(res, linearize, linpoint)
+            return res
+        end
 
-        model = Model(Clarabel.Optimizer)
-        set_optimizer_attribute(model, "verbose", false)
-        @variable(model, δx[1:nunk,1:N])
-        @variable(model, w[1:nunk,1:N-1])
-        @variable(model, δu[1:nparams])
-        @variable(model, tc_lin)
-        @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .== res.derivs[1] * [reshape(δx[:, 1:(N-1)], :); δu] .+ res.value .- [reshape(xref[:, 2:N], :); 0])
-        @constraint(model, reshape(δx[:, 1], :) .== tic .- reshape(xref[:, 1], :))
-        @constraint(model, reshape(δx[3:4, end], :) .== [0.0, 1.0] .- reshape(xref[3:4, end], :))
-        # TODO
-        @constraint(model, δu + uref .<= 1.0)
-        @constraint(model, -1.0 .<= δu + uref)
-        
-        @variable(model, μ)
-        @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
-        
-        @variable(model, ηₚ)
-        @constraint(model, [ηₚ; 1.0; reshape(δx, :); reshape(δu, :)] ∈ MOI.RotatedSecondOrderCone(length(reshape(δx, :)) + length(reshape(δu, :)) + 2))
+        tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0, y => 0.0]))
+        xref = iguess
+        uref = tunable
+        uhist = []
+        xhist = []
+        whist = []
+        costs = []
+        rcosts = []
+        delta_lin_hist = []
+        nparams = length(tunable)
+        res = linearize(xref[:, 1:N], uref)
+        rd = collect(res.derivs[1]) # res gets clobbered for some reason by linearize?
+        rv = collect(res.value)
 
-        
-        @variable(model, ν >= 0)
-        @constraint(model, [ν; tc_lin] ∈ MOI.NormOneCone(2))
+        r = 1.0
+        β = 2.0
+        α = 2.0
+        ρ₀ = 0.0
+        ρ₁ = 0.25
+        ρ₂ = 0.7
 
-        @variable(model, L)
-        @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
-        @objective(model, Min, 1000*μ + r*ηₚ + 10*ν + L)
-        optimize!(model)
+        last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
+        for i=1:100
 
-        est_cost = 1000*value(μ) + value(ν) + value(L) # the linearized cost estimate from the last iterate
-        xref_candidate = xref .+ value.(δx)
-        uref_candidate = uref .+ value.(δu)
-        res_candidate = linearize(xref[:, 1:N-1], uref)
-        actual_cost = 1000*norm(res_candidate.value[1:end-1] .- reshape(xref[:, 2:N], :) .- reshape(value.(δx)[:, 2:N], :), 1) + abs(res_candidate.value[end]) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
-        push!(costs, est_cost)
-        push!(rcosts, actual_cost)
-        dk = last_cost - actual_cost
-        dl = last_cost - est_cost
+            model = Model(Clarabel.Optimizer)
+            set_optimizer_attribute(model, "verbose", false)
+            @variable(model, δx[1:nunk,1:N])
+            @variable(model, w[1:nunk,1:N-1])
+            @variable(model, δu[1:nparams])
+            @variable(model, tc_lin)
+            @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .== rd * [reshape(δx[:, 1:N], :); δu] .+ rv .- [reshape(xref[:, 2:N], :); 0])
+            @constraint(model, reshape(δx[:, 1], :) .== tic .- reshape(xref[:, 1], :))
+            #@constraint(model, reshape(δx[3:4, end], :) .== [0.0, 1.0] .- reshape(xref[3:4, end], :))
+            # TODO
+            @constraint(model, δu + uref .<= 1.0)
+            @constraint(model, -1.0 .<= δu + uref)
+            
+            @variable(model, μ)
+            @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
+            
+            @variable(model, ηₚ)
+            @constraint(model, [ηₚ; 1.0; reshape(δx, :); reshape(δu, :)] ∈ MOI.RotatedSecondOrderCone(length(reshape(δx, :)) + length(reshape(δu, :)) + 2))
 
-        ρᵏ = dk/dl
-        @show ρᵏ actual_cost est_cost last_cost
-        if ρᵏ < ρ₀ # it's gotten worse by too much, increase the penalty by α
-            r *= α
-            println("REJECT $r try $(r*α)")
+            #=
+            @variable(model, ηₙ) # terminal constraint trust region
+            @constraint(model, [ηₙ; 1.0; tc_lin - res.value[end]] ∈ MOI.RotatedSecondOrderCone(3))
+    =#
+            @variable(model, ν >= 0)
+            @constraint(model, [ν; tc_lin] ∈ MOI.NormOneCone(2))
+
+            @variable(model, L)
+            @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
+            @objective(model, Min, 1000*μ + r*ηₚ +500*ν + L)
+            optimize!(model)
+
+            est_cost = 1000*value(μ) + 500*value(ν) + value(L) # the linearized cost estimate from the last iterate
+            xref_candidate = xref .+ value.(δx)
+            uref_candidate = uref .+ value.(δu)
+            res_candidate = linearize(xref_candidate, uref_candidate)
+            @show value(μ) value(ν) value(L) value(ηₚ) 0.5*sum(value.([reshape(δx, :); reshape(δu, :)])).^2
+            push!(delta_lin_hist, res_candidate.derivs[1])
+            #@show predicted
+            actual = res_candidate.value[1:end-1]
+            #@show actual
+            lin_err = actual .- reshape(xref_candidate[:, 2:N], :)
+            #@show lin_err
+            actual_cost = 1000*norm(lin_err, 1) + 500*abs(res_candidate.value[end]) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
+            push!(costs, est_cost)
+            push!(rcosts, actual_cost)
+            dk = last_cost - actual_cost
+            dl = last_cost - est_cost
+
+            ρᵏ = dk/dl
+            @show norm(lin_err, 1) abs(res_candidate.value[end]) get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
+            @show ρᵏ actual_cost est_cost last_cost
+            if ρᵏ < ρ₀ # it's gotten worse by too much, increase the penalty by α
+                println("REJECT $r try $(r*α)")
+                r *= α
+                sleep(0.5)
+                continue # reject the step
+            end
+            
+            if maximum(abs.(xref .- xref_candidate)) < 1e-4 && maximum(abs.(uref .- uref_candidate)) < 1e-4
+                break # done
+            end
+            res = res_candidate # accept the step
+            rd = collect(res.derivs[1]) # res gets clobbered for some reason by linearize?
+            rv = collect(res.value)
+            xref = xref_candidate
+            uref = uref_candidate
+            if ρᵏ < ρ₁# it's gotten worse by too much (but acceptable), increase the penalty by α
+                println("OK, CONTRACT $r to $(r*α)")
+                r *= α
+            elseif ρᵏ < ρ₂
+                println("OK $r")
+                # it's FINE go again 
+            else
+                println("OK, EXPAND $r TO $(r/β)")
+                # it hasn't gotten good enough decrease the penalty by a factor of β
+                r /= β
+            end
+            push!(uhist, uref)
+            push!(xhist, xref)
+            push!(whist, value.(w))
+            last_cost = actual_cost
             sleep(0.5)
-            continue # reject the step
         end
-        res = res_candidate # accept the step
-        xref = xref_candidate
-        uref = uref_candidate
-        if ρᵏ < ρ₁# it's gotten worse by too much (but acceptable), increase the penalty by α
-            println("OK, CONTRACT $r to $(r*α)")
-            r *= α
-        elseif ρᵏ < ρ₂
-            println("OK $r")
-            # it's FINE go again 
-        else
-            println("OK, EXPAND $r TO $(r/β)")
-            # it hasn't gotten good enough decrease the penalty by β
-            r /= β
-        end
-        push!(uhist, uref)
-        push!(xhist, xref)
-        push!(whist, value.(w))
-        last_cost = actual_cost
-        sleep(0.5)
+        return (uhist, xhist, whist, costs, rcosts, delta_lin_hist, linearize)
     end
-    return (uhist, xhist, whist, costs, rcosts, linearize)
-end
 
-u,x,wh,ch,rch,lnz = trajopt(sys, (0.0, 1.0), 20, Dict(sys.dblint.m => 0.25), Dict(sys.dblint.x => collect(LinRange(0.0, 0.4, 20)), sys.dblint.v => zeros(20)), 
-    [sys.dblint.x => 0.0, sys.dblint.v => 0.0], (sys.dblint.f) .^ 2, 0.0, 
-    sys.dblint.x - 3.0, 0.0, 500*(sys.dblint.v)^2 + 500*(10*(sys.dblint.x - 1.0))^2)
-    
+
+    u,x,wh,ch,rch,dlh,lnz = trajopt(sys, (0.0, 1.0), 20, 
+        Dict(sys.dblint.m => 0.25), 
+        Dict(sys.dblint.x => collect(LinRange(0.0, 1.0, 20)), 
+        sys.dblint.v => zeros(20)), 
+        [sys.dblint.x => 0.0, sys.dblint.v => 0.0], 
+        (sys.dblint.f) .^ 2, 0.0, 
+        0.0, 0.0, 
+        (30*abs(sys.dblint.v))^4 + (30*abs((sys.dblint.x - 1.0)))^4);
+    2
+end
+ 
 using Makie, GLMakie
 f = Figure()
 ax1 = Makie.Axis(f[1,1])
-for xref in x[end-1:end]
+for xref in x
     lines!(ax1, 1:length(xref[end, :]), xref[end-1, :])
 end
 ax2 = Makie.Axis(f[2,1])
-for xref in x[end-1:end]
+for xref in x
     lines!(ax2, 1:length(xref[end, :]), xref[end, :])
 end
 ax3 = Makie.Axis(f[3,1])
-for uref in u[end-1:end]
+for uref in u
     lines!(ax3, 1:length(uref), uref)
 end
 f
 
+f = Figure()
+ax1 = Makie.Axis(f[1,1])
+ax2 = Makie.Axis(f[2,1])
+ax3 = Makie.Axis(f[3,1])
+xref = x[end]
+uref = u[end]
+lines!(ax1, 1:length(xref[end, :]), xref[end-1, :])
+lines!(ax2, 1:length(xref[end, :]), xref[end, :])
+lines!(ax3, 1:length(uref), uref)
+f
 
 csys = structural_simplify(sys)
 prob = ODEProblem(csys, [csys.dblint.m => 0.25, csys.dblint.v => 0.0, csys.dblint.x => 0.0, csys.input.vals => u[end]], (0.0, 1.0))
 sol = solve(prob, Tsit5(); dtmax=0.01)
-lines(sol.t, sol[csys.dblint.x])
+lines(sol.t, sol[csys.dblint.v])
 lines(Float64.(1:length(xref[end, :])), xref[end, :])
 
 function linearize(ref)

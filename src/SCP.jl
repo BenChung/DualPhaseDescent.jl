@@ -41,21 +41,15 @@ end
     @parameters begin
         m, [tunable = false]
         τ = 1.0, [tunable = false]
-        x₀
-        v₀
     end
     @variables begin
         f(t)
         x(t)
-        xₐ(t)
         v(t)
-        vₐ(t)
     end
     @equations begin
         D(v) ~ τ * f / m
-        D(x) ~ τ * vₐ
-        xₐ ~ x + x₀
-        vₐ ~ v + v₀
+        D(x) ~ τ * v
     end
 end
 
@@ -69,6 +63,28 @@ function build_example_problem()
 end
 
 sys = build_example_problem()
+
+function substitute_parameter_metadata(sys, rewriter)
+    @set! sys.systems = map(subsys -> substitute_parameter_metadata(subsys, rewriter), ModelingToolkit.get_systems(sys))
+    @set! sys.ps = rewriter(sys, ModelingToolkit.get_ps(sys))
+    return sys
+end
+
+ssys = structural_simplify(sys)
+
+current_interval = ClosedInterval(0.0, 0.1)
+relevant_mask = [!isinf(first(reltime(s))) && !isempty(intersect(ClosedInterval(reltime(s)...), current_interval)) for s in parameters(sys)]
+relevant = parameters(sys)[relevant_mask]
+msys = substitute_parameter_metadata(sys, (sys, ps) -> begin 
+    [if any(isequal(parameters(sys, [p])[1]), relevant)
+        setmetadata(p, ModelingToolkit.VariableTunable, true)
+    else p end for p in ps] end)
+ssimp = structural_simplify(msys)
+prob = ODEProblem(ssimp, [ssimp.dblint.m => 1.0, ssimp.dblint.x => 0.0, ssimp.dblint.v => 0.0], (0.0, 1.0))
+prob_sense = ODEForwardSensitivityProblem(prob, ForwardSensitivity())
+solve(prob_sense, Tsit5())
+
+
 RuntimeGeneratedFunctions.init(@__MODULE__)
 begin
     function trajopt(

@@ -1,40 +1,61 @@
 #module SCP
 using LinearAlgebra
 using OrdinaryDiffEq
-using ModelingToolkit, Symbolics
-using SciMLSensitivity, SymbolicIndexingInterface, SciMLStructures
+using ModelingToolkit, Symbolics, Setfield
+using SciMLSensitivity, SymbolicIndexingInterface, SciMLStructures, IntervalSets
 using ForwardDiff, ComponentArrays, DiffResults, RuntimeGeneratedFunctions
 using JuMP, Clarabel
 import MathOptInterface as MOI
 
 using ModelingToolkit: t_nounits as t, D_nounits as D
 using ModelingToolkitStandardLibrary, ModelingToolkitStandardLibrary.Blocks
-ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, b, c, d) = 
+
+
+struct RelevantTime end
+Symbolics.option_to_metadata_type(::Val{:relevant_time}) = RelevantTime
+function reltime(x, default = (-Inf,Inf))
+    p = Symbolics.getparent(x, nothing)
+    p === nothing || (x = p)
+    Symbolics.getmetadata(x, RelevantTime, default)
+end
+
+Symbolics.@register_symbolic get_sampled_data_internal(t::Float64, buffer::Vector{Float64}, dt, circular_buffer)
+function get_sampled_data_internal(a, b, c, d)
     ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, collect(b), convert(eltype(b), c), d)
+end
 @component function first_order_hold(; name, N, dt)
-    params = @parameters vals[1:N] = zeros(N)
+    syms = [Symbol("val$i") for i=1:N]
+    params = [first(@parameters $sym = 0.0, [tunable = false, relevant_time = ((i-1)*dt,i*dt)]) for (i, sym) in enumerate(syms)]
+    @parameters vals[1:N]=zeros(N) 
     systems = @named begin
         output = RealOutput()
     end
     eqs = [
-        output.u ~ ifelse(t < dt*N, ModelingToolkitStandardLibrary.Blocks.get_sampled_data(t, vals, dt, false), vals[end])
+        output.u ~ ifelse(t < dt*N, get_sampled_data_internal(t, vals, dt, false), params[end])
     ]
-    return ODESystem(eqs, t, [], params; name, systems, continuous_events = [t % dt ~ 0])
+    pdeps = [vals ~ params]
+    return ODESystem(eqs, t, [], [[vals]; params]; name, systems, continuous_events = [t % dt ~ 0], parameter_dependencies = pdeps)
 end
 
 @mtkmodel DblInt begin
     @parameters begin
         m, [tunable = false]
         τ = 1.0, [tunable = false]
+        x₀
+        v₀
     end
     @variables begin
         f(t)
         x(t)
+        xₐ(t)
         v(t)
+        vₐ(t)
     end
     @equations begin
         D(v) ~ τ * f / m
-        D(x) ~ τ * v
+        D(x) ~ τ * vₐ
+        xₐ ~ x + x₀
+        vₐ ~ v + v₀
     end
 end
 
@@ -48,7 +69,6 @@ function build_example_problem()
 end
 
 sys = build_example_problem()
-
 RuntimeGeneratedFunctions.init(@__MODULE__)
 begin
     function trajopt(
@@ -93,9 +113,9 @@ begin
             end
             ensemble = EnsembleProblem(base_prob, prob_func=segment, safetycopy=false)
             sim = solve(ensemble, Tsit5(), trajectories=N-1)
-            final_state = collect(sim[end].u[end]) 
-            upd_cost(final_state, get_cost(final_state) + terminal_cost_fun(inp.u0[:,N], params, sim[end].t))
-            terminal_cstr_value = terminal_cstr_fun(inp.u0[:,N], params, sim[end].t)
+            final_state = collect(last(sim)[end]) 
+            upd_cost(final_state, get_cost(final_state) + terminal_cost_fun(inp.u0[:,N], params, last(sim).t))
+            terminal_cstr_value = terminal_cstr_fun(inp.u0[:,N], params, last(sim).t)
             #@show terminal_cstr_value
             return [reduce(vcat, map(s->s.u[end], sim[1:end-1])); final_state; terminal_cstr_value]
         end
@@ -117,6 +137,7 @@ begin
         rcosts = []
         delta_lin_hist = []
         nparams = length(tunable)
+        linearize(ComponentArray(u0=collect(xref[:, 1:N]), params=collect(uref)))
         res = linearize(xref[:, 1:N], uref)
         rd = collect(res.derivs[1]) # res gets clobbered for some reason by linearize?
         rv = collect(res.value)
@@ -139,7 +160,7 @@ begin
             @variable(model, tc_lin)
             @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .== rd * [reshape(δx[:, 1:N], :); δu] .+ rv .- [reshape(xref[:, 2:N], :); 0])
             @constraint(model, reshape(δx[:, 1], :) .== tic .- reshape(xref[:, 1], :))
-            #@constraint(model, reshape(δx[3:4, end], :) .== [0.0, 1.0] .- reshape(xref[3:4, end], :))
+            @constraint(model, reshape(δx[3:4, end], :) .== [0.0, 1.0] .- reshape(xref[3:4, end], :))
             # TODO
             @constraint(model, δu + uref .<= 1.0)
             @constraint(model, -1.0 .<= δu + uref)
@@ -185,7 +206,7 @@ begin
             if ρᵏ < ρ₀ # it's gotten worse by too much, increase the penalty by α
                 println("REJECT $r try $(r*α)")
                 r *= α
-                sleep(0.5)
+                #sleep(0.5)
                 continue # reject the step
             end
             
@@ -212,14 +233,14 @@ begin
             push!(xhist, xref)
             push!(whist, value.(w))
             last_cost = actual_cost
-            sleep(0.5)
+            #sleep(0.5)
         end
         return (uhist, xhist, whist, costs, rcosts, delta_lin_hist, linearize)
     end
 
 
     u,x,wh,ch,rch,dlh,lnz = trajopt(sys, (0.0, 1.0), 20, 
-        Dict(sys.dblint.m => 0.25), 
+        Dict(sys.dblint.m => 0.25, sys.dblint.x₀ => 0.0, sys.dblint.v₀ => 0.0), 
         Dict(sys.dblint.x => collect(LinRange(0.0, 1.0, 20)), 
         sys.dblint.v => zeros(20)), 
         [sys.dblint.x => 0.0, sys.dblint.v => 0.0], 
@@ -244,79 +265,3 @@ for uref in u
     lines!(ax3, 1:length(uref), uref)
 end
 f
-
-f = Figure()
-ax1 = Makie.Axis(f[1,1])
-ax2 = Makie.Axis(f[2,1])
-ax3 = Makie.Axis(f[3,1])
-xref = x[end]
-uref = u[end]
-lines!(ax1, 1:length(xref[end, :]), xref[end-1, :])
-lines!(ax2, 1:length(xref[end, :]), xref[end, :])
-lines!(ax3, 1:length(uref), uref)
-f
-
-csys = structural_simplify(sys)
-prob = ODEProblem(csys, [csys.dblint.m => 0.25, csys.dblint.v => 0.0, csys.dblint.x => 0.0, csys.input.vals => u[end]], (0.0, 1.0))
-sol = solve(prob, Tsit5(); dtmax=0.01)
-lines(sol.t, sol[csys.dblint.v])
-lines(Float64.(1:length(xref[end, :])), xref[end, :])
-
-function linearize(ref)
-    neltype = eltype(ref)
-    prob = ODEProblem(sys, [sys.dblint.v => 0.0, sys.dblint.x=>0.0, sys.dblint.m => 1.0], (0.0, 1.0))
-    params = ModelingToolkit.MTKParameters(sys, [sys.dblint.m => 1.0])   
-    tunable, _, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
-    params_ = SciMLStructures.replace(SciMLStructures.Tunable(), params, neltype.(tunable))
-    upd_inp = setp(sys, sys.input.vals)
-    upd_start = setu(sys, [sys.dblint.v, sys.dblint.x])
-
-    function segment(prob, i, repeat)
-        neltype = eltype(ref)
-        nu0 = neltype.(prob.u0)
-        upd_start(nu0, ref.u0[:, i])
-        params_ = copy(params_)
-        upd_inp(params_, ref.p)
-        return remake(prob, u0=nu0, p=params_, tspan=((i-1)/10, i/10))
-    end
-    ensemble = EnsembleProblem(prob, prob_func=segment)
-    sim = solve(ensemble, Tsit5(), trajectories=20)
-    return reduce(vcat, map(s->s.u[end], sim))
-end
-@time sol = linearize(ComponentArray(u0=zeros(2,20), p=ones(20)))
-
-res = DiffResults.JacobianResult(zeros(40), ComponentArray(u0=zeros(2,20), p=ones(20)));
-transition_system = @time ForwardDiff.jacobian(linearize, ComponentArray(u0=zeros(2,20), p=ones(20)))
-ForwardDiff.jacobian!(res, linearize, ComponentArray(u0=zeros(2,20), p=zeros(20)))
-using JuMP, ECOS, Clarabel
-
-xref = zeros(2, 21)
-uref = zeros(20)
-ic = zeros(2)
-tc = [0.0, 1.0 - 1e-2]
-#model = Model(ECOS.Optimizer)
-model = Model(Clarabel.Optimizer)
-@variable(model, δx[1:2,1:21])
-@variable(model, δu[1:20])
-@constraint(model, reshape(δx[:, 2:21], :) .== res.derivs[1] * [reshape(δx[:, 1:20], :); δu] .+ res.value .- reshape(xref[:, 2:21], :))
-@constraint(model, reshape(δx[:, 1], :) .== ic .- reshape(xref[:, 1], :))
-@constraint(model, reshape(δx[:, 21], :) .== tc .- reshape(xref[:, 21], :))
-@constraint(model, δu + uref .<= 1.0)
-@constraint(model, -1.0 .<= δu + uref)
-
-@variable(model, μ)
-@constraint(model, [μ; reshape(δx[:, 2:21], :) .+ reshape(xref[:, 2:21], :) .- res.value] ∈ MOI.NormOneCone(length(reshape(δx[:, 2:21], :)) + 1))
-
-@variable(model, ηₚ)
-@constraint(model, [ηₚ; 1.0; reshape(δx, :); reshape(δu, :)] ∈ MOI.RotatedSecondOrderCone(length(reshape(δx, :)) + length(reshape(δu, :)) + 2))
-
-@variable(model, ηᵤ)
-@constraint(model, [ηᵤ; 1.0; δu .+ uref] ∈ MOI.RotatedSecondOrderCone(length(δu) + 2))
-
-@objective(model, Min, 10*μ + 100*ηₚ + ηᵤ)
-optimize!(model)
-value.(μ)
-
-ForwardDiff.jacobian!(res, linearize, ComponentArray(u0=xref[:, 1:20] + value.(δx[:, 1:20]), p=uref + value.(δu)))
-xref = xref + value.(δx)
-uref = uref + value.(δu)

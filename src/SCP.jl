@@ -10,6 +10,16 @@ import MathOptInterface as MOI
 using ModelingToolkit: t_nounits as t, D_nounits as D
 using ModelingToolkitStandardLibrary, ModelingToolkitStandardLibrary.Blocks
 
+struct ParameterUID 
+    id::Symbol
+end
+Symbolics.option_to_metadata_type(::Val{:param_uid}) = ParameterUID
+function uid(x, default=nothing)
+    p = Symbolics.getparent(x, nothing)
+    p === nothing || (x = p)
+    return Symbolics.getmetadata(x, ParameterUID, default)
+end
+
 
 struct RelevantTime end
 Symbolics.option_to_metadata_type(::Val{:relevant_time}) = RelevantTime
@@ -21,11 +31,11 @@ end
 
 Symbolics.@register_symbolic get_sampled_data_internal(t::Float64, buffer::Vector{Float64}, dt, circular_buffer)
 function get_sampled_data_internal(a, b, c, d)
-    ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, collect(b), convert(eltype(b), c), d)
+    ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, (b), convert(eltype(b), c), d)
 end
 @component function first_order_hold(; name, N, dt)
     syms = [Symbol("val$i") for i=1:N]
-    params = [first(@parameters $sym = 0.0, [tunable = false, relevant_time = ((i-1)*dt,i*dt)]) for (i, sym) in enumerate(syms)]
+    params = [first(@parameters $sym = 0.0, [tunable = true, relevant_time = ((i-1)*dt,i*dt)]) for (i, sym) in enumerate(syms)]
     @parameters vals[1:N]=zeros(N) 
     systems = @named begin
         output = RealOutput()
@@ -70,28 +80,9 @@ function substitute_parameter_metadata(sys, rewriter)
     return sys
 end
 
-ssys = structural_simplify(sys)
-
-current_interval = ClosedInterval(0.0, 0.1)
-relevant_mask = [!isinf(first(reltime(s))) && !isempty(intersect(ClosedInterval(reltime(s)...), current_interval)) for s in parameters(sys)]
-relevant = parameters(sys)[relevant_mask]
-msys = substitute_parameter_metadata(sys, (sys, ps) -> begin 
-    [if any(isequal(parameters(sys, [p])[1]), relevant)
-        setmetadata(p, ModelingToolkit.VariableTunable, true)
-    else p end for p in ps] end)
-ssimp = structural_simplify(msys)
-prob = ODEProblem(ssimp, [ssimp.dblint.m => 1.0, ssimp.dblint.x => 0.0, ssimp.dblint.v => 0.0], (0.0, 1.0))
-prob_sense = ODEForwardSensitivityProblem(prob, ForwardSensitivity())
-solve(prob_sense, Tsit5())
-
-
 RuntimeGeneratedFunctions.init(@__MODULE__)
 begin
-    function trajopt(
-        sys, tspan, N, given_params, initial_guess,
-        ic, running_cost, terminal_cost, 
-        g, h, Ph
-    )
+    function CTCS_xform(sys, tspan, running_cost, g, h)
         t = sys.iv
         (ti, tf) = tspan
         dtime = tf - ti
@@ -103,8 +94,72 @@ begin
             D(l) ~ running_cost,
             D(y) ~ sum(max.(0.0, g) .^ 2) + sum(h .^ 2)
         ]
-        augmented_system = ODESystem(eqs, t, systems=[sys], name=:augmented_system)
-        tsys = structural_simplify(augmented_system)
+        return ODESystem(eqs, t, systems=[sys], name=:augmented_system), l, y
+    end
+
+    function augment_offsets(sys)
+        csys = complete(sys)
+        function rewrite_dervars(sys, varmap; is_root=false)
+            diff_vars = filter(v->!any(isequal(v), keys(varmap)), ModelingToolkit.collect_differential_variables(ModelingToolkit.get_eqs(sys)))
+            offsets = [let sym = gensym(:ic); (@parameters $sym=0 [param_uid=sym])[1] end for var in diff_vars]
+            local_varmap = Dict(diff_vars .=> diff_vars .+ offsets)
+            global_varmap = merge(varmap, local_varmap)
+            rsys = rewrite_dervars.(ModelingToolkit.get_systems(sys), (global_varmap, ))
+            recursive_map = reduce(merge, last.(rsys); init = Dict())
+            rns(sym) = is_root ? sym : ModelingToolkit.renamespace(sys, sym)
+            output_varmap = [
+                rns.(keys(recursive_map)) .=> rns.(values(recursive_map))
+                rns.( diff_vars) .=> rns.( offsets)]
+            @set! sys.ps = [ModelingToolkit.get_ps(sys); offsets]
+            @set! sys.systems = first.(rsys)
+            @set! sys.eqs = Symbolics.expand_derivatives.(substitute(ModelingToolkit.get_eqs(sys), global_varmap))
+            return sys, Dict(output_varmap)
+        end
+        mod_sys, vmap = rewrite_dervars(csys, Dict(); is_root=true)
+        mod_sys = complete(mod_sys)
+        return mod_sys, vmap
+    end
+
+    function build_spbms(sys, N, iguess, given_params, offset_vars)
+        base_spbms = ODEProblem[]
+        spbms = ODEProblem[]
+        relevant_masks = BitSet[]
+        update_parms = []
+        update_offset = []
+        for i=1:N-1
+            current_interval = ClosedInterval((i-1)/(N-1), (i)/(N-1))
+            relevant_mask = [
+                (!isinf(first(reltime(s))) || istunable(s)) && 
+                !isempty(intersect(ClosedInterval(reltime(s)...), current_interval)) for s in tunable_parameters(sys)]
+            relevant = tunable_parameters(sys)[relevant_mask]
+            @show BitSet([i for i in eachindex(relevant_mask) if relevant_mask[i] == 1])
+            msys = substitute_parameter_metadata(sys, (sys, ps) -> begin 
+                [if all(!isequal(p), relevant)
+                    setmetadata(p, ModelingToolkit.VariableTunable, false)
+                else p end for p in ps] end)
+            msys = complete(msys)
+            @show tunable_parameters(msys)
+            prob = ODEProblem(msys, unknowns(sys) .=> iguess[:, 1], ((i-1)/(N-1), (i)/(N-1)), given_params)
+            prob_sense = ODEForwardSensitivityProblem(prob, ForwardSensitivity())
+            push!(base_spbms, prob)
+            push!(spbms, prob_sense)
+            push!(relevant_masks, BitSet([i for i in eachindex(relevant_mask) if relevant_mask[i] == 1]))
+            push!(update_parms, setp(msys, tunable_parameters(msys)))
+            push!(update_offset, setp(msys, [offset_vars[unk] for unk in unknowns(msys)]))
+        end
+        return base_spbms, spbms, relevant_masks, update_parms, update_offset
+    end
+
+    function build_trajopt_prob(
+        sys, tspan, N, given_params, initial_guess,
+        ic, running_cost, terminal_cost, 
+        g, h, Ph)
+        ctcs, l, y = CTCS_xform(sys, tspan, running_cost, g, h)
+
+
+        (ti, tf) = tspan
+        dtime = tf - ti
+        tsys = structural_simplify(ctcs)
         terminal_cost_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, terminal_cost))
         terminal_cstr_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, Ph))
         params = ModelingToolkit.MTKParameters(tsys, given_params)
@@ -130,9 +185,8 @@ begin
             ensemble = EnsembleProblem(base_prob, prob_func=segment, safetycopy=false)
             sim = solve(ensemble, Tsit5(), trajectories=N-1)
             final_state = collect(last(sim)[end]) 
-            upd_cost(final_state, get_cost(final_state) + terminal_cost_fun(inp.u0[:,N], params, last(sim).t))
-            terminal_cstr_value = terminal_cstr_fun(inp.u0[:,N], params, last(sim).t)
-            #@show terminal_cstr_value
+            upd_cost(final_state, get_cost(inp.u0[:,N]) + terminal_cost_fun(inp.u0[:,N], params, last(sim).t))
+            terminal_cstr_value = terminal_cstr_fun(inp.u0[:,end], params_, last(sim).t)
             return [reduce(vcat, map(s->s.u[end], sim[1:end-1])); final_state; terminal_cstr_value]
         end
 
@@ -144,6 +198,150 @@ begin
         end
 
         tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0, y => 0.0]))
+        xref = iguess
+        uref = tunable
+        reference_linsol = (linearize(xref[:, 1:N],uref))
+
+
+
+        offset_system, offset_vars = augment_offsets(ctcs)
+        @show unknowns(offset_system)
+        simplified_system = structural_simplify(offset_system)
+        @show unknowns(simplified_system)
+        
+        terminal_cost_fun = @RuntimeGeneratedFunction(generate_custom_function(simplified_system, terminal_cost))
+        terminal_cstr_fun = @RuntimeGeneratedFunction(generate_custom_function(simplified_system, Ph))
+
+        #upd_start = setp(simplified_system, offset_vars)# have to figure this out from the relevants
+        get_cost = getu(simplified_system, simplified_system.l)
+        upd_cost = setu(simplified_system, simplified_system.l)
+        
+        iguess = ModelingToolkit.varmap_to_vars(initial_guess, unknowns(simplified_system); 
+            defaults=Dict(unknowns(simplified_system) .=> (zeros(N), )), promotetoconcrete=false)
+        iguess = collect(reduce(hcat, iguess)')
+
+        base_spbms, spbms, relmasks, updp, updoffs = build_spbms(simplified_system, N, iguess, given_params, offset_vars)
+        
+        nstates = length(unknowns(simplified_system))
+        terminal_linearization_point_ref = ComponentArray(
+            uf_new=zeros(nstates))
+        terminal_linearization_output_ref = ComponentArray(
+            u=zeros(nstates),
+            c=zeros(1))
+        terminal_linearization_storage = DiffResults.JacobianResult(terminal_linearization_output_ref, terminal_linearization_point_ref)
+        function terminal_linearization_func(params, tf)
+            function compute_terminal_values(output, input)
+                output.u .= input.uf_linpoint
+                upd_cost(output.u, get_cost(input.uf_linpoint) + terminal_cost_fun(input.uf_linpoint, params, tf))
+                output.c .= terminal_cstr_fun(input.uf_linpoint, params, tf)
+            end
+        end
+        
+        @show unknowns(simplified_system)
+        tic = ModelingToolkit.varmap_to_vars(ic, unknowns(simplified_system); defaults=Dict([l => 0.0, y => 0.0]))
+        traj_opt_prob = Dict{Symbol, Any}(
+            :base_system => simplified_system,
+            :terminal_linearization => terminal_linearization_func,
+            :terminal_linearization_storage => terminal_linearization_storage,
+            :base_subproblems => base_spbms,
+            :subproblems => spbms,
+            :subproblem_parameter_mask => relmasks,
+            :subproblem_parameter_update => updp,
+            :subproblem_offset_update => updoffs,
+            :ensemble_prob => EnsembleProblem(spbms; safetycopy=false),
+            :offset_vars => offset_vars,
+            :initial_condition => tic,
+            :initial_guess => iguess,
+            :given_params => given_params,
+            :reference_linsol => reference_linsol
+        )
+        return traj_opt_prob
+    end
+
+    map_to_arr(map, len) = getindex.((map, ), 1:len)
+
+    function trajopt(prob)
+        xref = prob[:initial_guess]
+        uref = ModelingToolkit.varmap_to_vars(prob[:given_params], parameters(prob[:base_system]); defaults=defaults(prob[:base_system]))
+
+        for (spbm, upd!) in Iterators.zip(prob[:subproblems], prob[:subproblem_parameter_update])
+            upd!(spbm, uref)
+        end
+        for (spbm, upd_u0!, xv) in Iterators.zip(prob[:subproblems], prob[:subproblem_offset_update], eachcol(xref))
+            upd_u0!(spbm, xv)
+        end
+        traj_sensitivities = solve(prob[:ensemble_prob], Tsit5(), EnsembleSerial())
+        #return extract_local_sensitivities(traj_sensitivities[1], length(traj_sensitivities[1]))
+        final_state, final_jac = extract_local_sensitivities(traj_sensitivities[end], length(traj_sensitivities[end]))
+
+        nstates = length(unknowns(prob[:base_subproblems][end].f.sys))
+        input_ref = ComponentArray(
+            uf_linpoint=zeros(nstates))
+        output_ref = ComponentArray(
+            u=zeros(nstates),
+            c=zeros(1))
+        ForwardDiff.jacobian!(prob[:terminal_linearization_storage],
+            prob[:terminal_linearization](ModelingToolkit.MTKParameters(prob[:base_system], prob[:given_params]), prob[:base_subproblems][end].tspan[end]),
+            output_ref, input_ref)
+
+        offset_varmap = prob[:offset_vars]
+        offset_vars = Set(values(offset_varmap))
+        offset_invmap = Dict(values(offset_varmap) .=> keys(offset_varmap))
+
+        jac = prob[:terminal_linearization_storage].derivs[1]
+        @show reduce(hcat, final_jac) * zeros(6)
+        @show prob[:terminal_linearization_storage].derivs[1]
+        @show parameters(prob[:base_system])[collect(prob[:subproblem_parameter_mask][1])]
+        @show collect(prob[:subproblem_parameter_mask][1])
+        
+        base_unknowns = unknowns(prob[:base_system])
+        all_params = tunable_parameters(prob[:base_system])
+        control_vect = filter(p->all(!isequal(p), offset_vars), all_params)
+
+
+        N=20
+        sense_jac = zeros(nstates*(N-1), nstates * (N-1) + length(all_params))
+        for i=1:N-1
+            local_spbm = prob[:base_subproblems][i]
+            local_unknowns = unknowns(local_spbm.f.sys)
+            local_params = tunable_parameters(local_spbm.f.sys)
+            mule_params = copy(parameter_values(local_spbm))
+            tunables,repack = SciMLStructures.canonicalize(SciMLStructures.Tunable(), mule_params)
+            mod_mule = repack(collect(eachindex(local_params)))
+            local_params_inorder = local_params[last.(sort(getp(local_spbm.f.sys, local_params)(mod_mule) .=> eachindex(local_params), by=first))]
+            local_controls = filter(lp -> any(isequal(lp),control_vect), local_params)
+
+            # offset_map; maps local tunables to global unknowns
+            offset_map = [findfirst(isequal(v), local_params_inorder) for v in getindex.((offset_varmap, ), local_unknowns)] 
+            # control_map; maps local tunables to global controls
+            control_map = [findfirst(isequal(v), local_params_inorder) for v in local_controls]
+            # state_map; maps local unknowns to global unknowns
+            state_map = [findfirst(isequal(v), local_unknowns) for v in base_unknowns]
+            @show state_map
+
+
+            # offset map and control map cover all local tunables; they tell us what columns of the global jacobian we should write the sensitivities into
+            # state map tells us which rows of the global jacobian we should write into
+            # the global jacobian is built with inputs δx[1:nunk, 1:N]; δu. The δx is laid out as x[1,1], ..., x[nunk,1], x[2,1] and so on
+            # the outputs are x[1:nunk,2:N]
+            lref, lsense = extract_local_sensitivities(traj_sensitivities[i], length(traj_sensitivities[i]), true)
+
+            sense_jac[(i-1)*nstates + 1:i*nstates, [(1:nstates) .+ (i - 1) * nstates; [(N-1)*nstates + findfirst(isequal(v), all_params) for v in local_controls]]] .= lsense[state_map, [offset_map; control_map]]
+        end
+        @show sense_jac
+
+        return sense_jac
+
+    end
+    #res = trajopt(trajprob)        
+    #throw("STOP")
+    
+#=
+    function trajopt(
+        sys, tspan, N, given_params, initial_guess,
+        ic, running_cost, terminal_cost, 
+        g, h, Ph
+    )
         xref = iguess
         uref = tunable
         uhist = []
@@ -253,16 +451,18 @@ begin
         end
         return (uhist, xhist, whist, costs, rcosts, delta_lin_hist, linearize)
     end
+    =#
 
-
-    u,x,wh,ch,rch,dlh,lnz = trajopt(sys, (0.0, 1.0), 20, 
-        Dict(sys.dblint.m => 0.25, sys.dblint.x₀ => 0.0, sys.dblint.v₀ => 0.0), 
+#u,x,wh,ch,rch,dlh,lnz
+    trajprob = build_trajopt_prob(sys, (0.0, 1.0), 20, 
+        Dict(sys.dblint.m => 0.25), 
         Dict(sys.dblint.x => collect(LinRange(0.0, 1.0, 20)), 
         sys.dblint.v => zeros(20)), 
         [sys.dblint.x => 0.0, sys.dblint.v => 0.0], 
         (sys.dblint.f) .^ 2, 0.0, 
         0.0, 0.0, 
         (30*abs(sys.dblint.v))^4 + (30*abs((sys.dblint.x - 1.0)))^4);
+    trajopt(trajprob)
     2
 end
  

@@ -120,34 +120,84 @@ begin
         return mod_sys, vmap
     end
 
+
+    function update_tunables_by_predicate(sys, predicate)
+        relevant_mask = [predicate(s) for s in tunable_parameters(sys)]
+        relevant = tunable_parameters(sys)[relevant_mask]
+        return substitute_parameter_metadata(sys, (sys, ps) -> begin 
+            [if all(!isequal(p), relevant)
+                setmetadata(p, ModelingToolkit.VariableTunable, false)
+            else p end for p in ps] end)
+    end
+
+    function update_tunables(sys, relevant_mask)
+        relevant = tunable_parameters(sys)[relevant_mask]
+        return substitute_parameter_metadata(sys, (sys, ps) -> begin 
+            [if all(!isequal(p), relevant)
+                setmetadata(p, ModelingToolkit.VariableTunable, false)
+            else p end for p in ps] end)
+    end
+
     function build_spbms(sys, N, iguess, given_params, offset_vars)
         base_spbms = ODEProblem[]
         spbms = ODEProblem[]
         relevant_masks = BitSet[]
         update_parms = []
         update_offset = []
+
         for i=1:N-1
             current_interval = ClosedInterval((i-1)/(N-1), (i)/(N-1))
             relevant_mask = [
                 (!isinf(first(reltime(s))) || istunable(s)) && 
                 !isempty(intersect(ClosedInterval(reltime(s)...), current_interval)) for s in tunable_parameters(sys)]
-            relevant = tunable_parameters(sys)[relevant_mask]
-            @show BitSet([i for i in eachindex(relevant_mask) if relevant_mask[i] == 1])
-            msys = substitute_parameter_metadata(sys, (sys, ps) -> begin 
-                [if all(!isequal(p), relevant)
-                    setmetadata(p, ModelingToolkit.VariableTunable, false)
-                else p end for p in ps] end)
-            msys = complete(msys)
+            msys = complete(update_tunables(sys, relevant_mask))
             @show tunable_parameters(msys)
             prob = ODEProblem(msys, unknowns(sys) .=> iguess[:, 1], ((i-1)/(N-1), (i)/(N-1)), given_params)
             prob_sense = ODEForwardSensitivityProblem(prob, ForwardSensitivity())
             push!(base_spbms, prob)
             push!(spbms, prob_sense)
             push!(relevant_masks, BitSet([i for i in eachindex(relevant_mask) if relevant_mask[i] == 1]))
-            push!(update_parms, setp(msys, tunable_parameters(msys)))
+            push!(update_parms, setp(msys, tunable_parameters(sys)))
             push!(update_offset, setp(msys, [offset_vars[unk] for unk in unknowns(msys)]))
         end
+
+
         return base_spbms, spbms, relevant_masks, update_parms, update_offset
+    end
+
+    function build_terminal_linearization(sys, given_params, terminal_cost, Ph)
+        terminal_sys = complete(update_tunables_by_predicate(sys, s -> isnothing(uid(s)))) # system with no offsets included
+        mparams = ModelingToolkit.MTKParameters(terminal_sys, given_params)
+        tunables,repack = SciMLStructures.canonicalize(SciMLStructures.Tunable(), mparams)
+        nparams = repack(eachindex(tunables))
+        base_ordering = tunable_parameters(terminal_sys)
+        tcstr_parmap = Dict(tunable_parameters(terminal_sys) .=> getp(terminal_sys, tunable_parameters(terminal_sys))(nparams)) # maps each parameter to the index at which it appears in the tunable vector
+        backmap = eachindex(base_ordering) .=> getindex.((tcstr_parmap, ), base_ordering) # i => j implies parameter i appears at position j in the tunable vector; problem_tunables[last.(backmap)] is in tunables order
+        fwdmap = sort(reverse.(backmap), by = first) # j => i implies parameter i appears at position j in the tunable vector; tunables[last.(fwdmap)] is now in problem order
+        backarr = last.(backmap)
+        
+        nstates = length(unknowns(terminal_sys))
+        terminal_linearization_point_ref = ComponentArray(
+            uf=zeros(nstates),
+            pars=tunables)
+        terminal_linearization_output_ref = ComponentArray(
+            u=zeros(nstates),
+            c=zeros(1))
+        terminal_linearization_storage = DiffResults.JacobianResult(terminal_linearization_output_ref, terminal_linearization_point_ref)
+
+        terminal_cost_fun = @RuntimeGeneratedFunction(generate_custom_function(terminal_sys, terminal_cost))
+        terminal_cstr_fun = @RuntimeGeneratedFunction(generate_custom_function(terminal_sys, Ph))
+        get_cost = getu(terminal_sys, terminal_sys.l)
+        upd_cost = setu(terminal_sys, terminal_sys.l)
+        function terminal_linearization_func(params, tf)
+            function compute_terminal_values(output, input)
+                _params = SciMLStructures.replace(SciMLStructures.Tunable(), params, input.pars[backarr])
+                output.u .= input.uf_linpoint
+                upd_cost(output.u, get_cost(input.uf_linpoint) + terminal_cost_fun(input.uf_linpoint, _params, tf))
+                output.c .= terminal_cstr_fun(input.uf_linpoint, _params, tf)
+            end
+        end
+        return terminal_linearization_storage, terminal_linearization_func, terminal_sys, mparams
     end
 
     function build_trajopt_prob(
@@ -222,20 +272,8 @@ begin
 
         base_spbms, spbms, relmasks, updp, updoffs = build_spbms(simplified_system, N, iguess, given_params, offset_vars)
         
-        nstates = length(unknowns(simplified_system))
-        terminal_linearization_point_ref = ComponentArray(
-            uf_new=zeros(nstates))
-        terminal_linearization_output_ref = ComponentArray(
-            u=zeros(nstates),
-            c=zeros(1))
-        terminal_linearization_storage = DiffResults.JacobianResult(terminal_linearization_output_ref, terminal_linearization_point_ref)
-        function terminal_linearization_func(params, tf)
-            function compute_terminal_values(output, input)
-                output.u .= input.uf_linpoint
-                upd_cost(output.u, get_cost(input.uf_linpoint) + terminal_cost_fun(input.uf_linpoint, params, tf))
-                output.c .= terminal_cstr_fun(input.uf_linpoint, params, tf)
-            end
-        end
+        
+        terminal_linearization_storage, terminal_linearization_func, terminal_sys, terminal_params = build_terminal_linearization(simplified_system, given_params, terminal_cost, Ph)
         
         @show unknowns(simplified_system)
         tic = ModelingToolkit.varmap_to_vars(ic, unknowns(simplified_system); defaults=Dict([l => 0.0, y => 0.0]))
@@ -253,6 +291,8 @@ begin
             :initial_condition => tic,
             :initial_guess => iguess,
             :given_params => given_params,
+            :terminal_sys => terminal_sys,
+            :terminal_params => terminal_params,
             :reference_linsol => reference_linsol
         )
         return traj_opt_prob
@@ -262,27 +302,31 @@ begin
 
     function trajopt(prob)
         xref = prob[:initial_guess]
-        uref = ModelingToolkit.varmap_to_vars(prob[:given_params], parameters(prob[:base_system]); defaults=defaults(prob[:base_system]))
-
+        uref = ModelingToolkit.varmap_to_vars(prob[:given_params], tunable_parameters(prob[:base_system]); defaults=defaults(prob[:base_system]))
         for (spbm, upd!) in Iterators.zip(prob[:subproblems], prob[:subproblem_parameter_update])
             upd!(spbm, uref)
         end
         for (spbm, upd_u0!, xv) in Iterators.zip(prob[:subproblems], prob[:subproblem_offset_update], eachcol(xref))
             upd_u0!(spbm, xv)
         end
+        not_offsets = ModelingToolkit.varmap_to_vars(prob[:given_params], filter(p->isnothing(uid(p)), tunable_parameters(prob[:base_system])); defaults=defaults(prob[:base_system]))
+
         traj_sensitivities = solve(prob[:ensemble_prob], Tsit5(), EnsembleSerial())
         #return extract_local_sensitivities(traj_sensitivities[1], length(traj_sensitivities[1]))
         final_state, final_jac = extract_local_sensitivities(traj_sensitivities[end], length(traj_sensitivities[end]))
 
         nstates = length(unknowns(prob[:base_subproblems][end].f.sys))
         input_ref = ComponentArray(
-            uf_linpoint=zeros(nstates))
+            uf_linpoint=xref[:, end],
+            pars=not_offsets)
         output_ref = ComponentArray(
             u=zeros(nstates),
             c=zeros(1))
         ForwardDiff.jacobian!(prob[:terminal_linearization_storage],
-            prob[:terminal_linearization](ModelingToolkit.MTKParameters(prob[:base_system], prob[:given_params]), prob[:base_subproblems][end].tspan[end]),
+            prob[:terminal_linearization](prob[:terminal_params], prob[:base_subproblems][end].tspan[end]),
             output_ref, input_ref)
+            @show prob[:terminal_linearization_storage]
+            throw("STOP")
 
         offset_varmap = prob[:offset_vars]
         offset_vars = Set(values(offset_varmap))
@@ -333,8 +377,8 @@ begin
         return sense_jac
 
     end
-    #res = trajopt(trajprob)        
-    #throw("STOP")
+    res = trajopt(trajprob)        
+    throw("STOP")
     
 #=
     function trajopt(
@@ -456,12 +500,13 @@ begin
 #u,x,wh,ch,rch,dlh,lnz
     trajprob = build_trajopt_prob(sys, (0.0, 1.0), 20, 
         Dict(sys.dblint.m => 0.25), 
-        Dict(sys.dblint.x => collect(LinRange(0.0, 1.0, 20)), 
+        Dict(sys.dblint.x => collect(LinRange(0.0, 1.1, 20)), 
         sys.dblint.v => zeros(20)), 
         [sys.dblint.x => 0.0, sys.dblint.v => 0.0], 
         (sys.dblint.f) .^ 2, 0.0, 
         0.0, 0.0, 
         (30*abs(sys.dblint.v))^4 + (30*abs((sys.dblint.x - 1.0)))^4);
+        throw("STOP2")
     trajopt(trajprob)
     2
 end

@@ -117,8 +117,8 @@ function trajopt(
     ρ₂ = 0.7
 
     last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
+    @show tic
     for i=1:100
-
         model = Model(Clarabel.Optimizer)
         set_optimizer_attribute(model, "verbose", false)
         @variable(model, δx[1:nunk,1:N])
@@ -127,7 +127,7 @@ function trajopt(
         @variable(model, tc_lin)
         @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .== rd * [reshape(δx[:, 1:N], :); δu] .+ rv .- [reshape(xref[:, 2:N], :); 0])
         @constraint(model, reshape(δx[:, 1], :) .== tic .- reshape(xref[:, 1], :))
-        @constraint(model, reshape(δx[3:4, end], :) .== [0.0, 1.0] .- reshape(xref[3:4, end], :))
+        #@constraint(model, reshape(δx[3:6, end], :) .== [0.0, 0.0, 1.0, 1.0] .- reshape(xref[3:6, end], :))
         # TODO
         @constraint(model, δu + uref .<= 1.0)
         @constraint(model, -1.0 .<= δu + uref)

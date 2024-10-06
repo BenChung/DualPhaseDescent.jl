@@ -1,30 +1,44 @@
-function VecDblInt3(;name)
+using Rotations
+import Quaternions
+
+function PoweredDescent(;name)
     pars = @parameters begin
         m, [tunable = false]
         τ = 1.0, [tunable = false]
+        eng_r[1:3] = [0.0,-1.0,0.0], [tunable = false]
+        MoI[1:3,1:3] = I(3), [tunable = false]
+        MoI_inv[1:3, 1:3] = I(3), [tunable = false]
     end
     vars = ModelingToolkit.@variables begin
-        f(t)[1:3]
+        qbi(t)[1:4]
+        fᵢ(t)[1:3]
+        fₗ(t)[1:3]
         x(t)[1:3]
         v(t)[1:3]
+        ω(t)[1:3]
+        trq(t)[1:3]
     end
     eqs = Symbolics.scalarize.([
-        D.(v) .~ τ * f * 2 * 9.81 ./ m - [0.0, -9.81, 0.0]
-        D.(x) .~ τ * v
+        D.(v) ./ τ .~ fᵢ ./ m - [0.0, 9.81, 0.0]
+        D.(x) ./ τ .~ v
+        D.(ω) ./ τ .~ MoI_inv * (trq + cross(MoI * ω, ω))
+        D.(qbi) ./ τ .~ Rotations.kinematics(QuatRotation(Quaternions.Quaternion(qbi...), false), Symbolics.scalarize(ω))
+        fᵢ .~ QuatRotation(Quaternions.Quaternion(qbi...), false) * Symbolics.scalarize(fₗ)
+        trq .~ cross(eng_r, fₗ)
     ])
     return ODESystem(eqs, t, vars, pars; name)
 end
 
 function build_example_problem()
-    @named dblint = VecDblInt3()
+    @named dblint = PoweredDescent()
     @named inputx = first_order_hold(N = 20, dt=0.05)
     @named inputy = first_order_hold(N = 20, dt=0.05)
     @named inputz = first_order_hold(N = 20, dt=0.05)
         
     @named model = ODESystem([
-        dblint.f[1] ~ inputx.output.u, 
-        dblint.f[2] ~ inputy.output.u, 
-        dblint.f[3] ~ inputz.output.u], t,
+        dblint.fₗ[1] ~ inputx.output.u, 
+        dblint.fₗ[2] ~ inputy.output.u, 
+        dblint.fₗ[3] ~ inputz.output.u], t,
         systems = [dblint, inputx, inputy, inputz])
     return model # structural_simplify(model)
 end

@@ -4,7 +4,7 @@ using OrdinaryDiffEq
 using ModelingToolkit, Symbolics, Setfield
 using SciMLSensitivity, SymbolicIndexingInterface, SciMLStructures, IntervalSets
 using ForwardDiff, ComponentArrays, DiffResults, RuntimeGeneratedFunctions
-using JuMP, Clarabel
+using JuMP, Clarabel, Ipopt
 import MathOptInterface as MOI
 
 using ModelingToolkit: t_nounits as t, D_nounits as D
@@ -38,6 +38,88 @@ end
 end
 
 RuntimeGeneratedFunctions.init(@__MODULE__)
+
+function filter_rules(rules::Dict, namespace::Symbol)
+    result = Dict()
+    for k in keys(rules)
+        path = split(string(k), ModelingToolkit.NAMESPACE_SEPARATOR)
+        if length(path) <= 1 || path[1] != string(namespace)
+            continue 
+        end
+        result[Symbol(join(path[2:end], ModelingToolkit.NAMESPACE_SEPARATOR))] = rules[k]
+    end
+    @show result
+    return result 
+end
+
+denamespace(sys, x::AbstractVector) = map(v -> denamespace(sys, v), x)
+function denamespace(sys, x)
+    x = Symbolics.unwrap(x)
+    if Symbolics.iscall(x)
+        if operation(x) isa ModelingToolkit.Operator
+            return Symbolics.maketerm(typeof(x), operation(x),
+                Any[denamespace(sys, arg) for arg in arguments(x)],
+                Symbolics.metadata(x))
+        end
+        if operation(x) === getindex
+            args = arguments(x)
+            return Symbolics.maketerm(
+                typeof(x), operation(x), vcat(denamespace(sys, args[1]), args[2:end]),
+                Symbolics.metadata(x))
+        end
+        if operation(x) isa Function
+            return Symbolics.maketerm(typeof(x), operation(x),
+                Any[denamespace(sys, arg) for arg in arguments(x)],
+                Symbolics.metadata(x))
+        end
+        dns_op = denamespace(sys, operation(x))
+        if isnothing(dns_op) return nothing end
+        return Symbolics.maketerm(typeof(x), dns_op, arguments(x), Symbolics.metadata(x))
+    elseif x isa Symbolics.Symbolic
+        if !startswith(string(x), string(ModelingToolkit.get_name(sys)))
+            return ParentScope(x)
+        end
+        new_name = strip(chopprefix(string(x), string(ModelingToolkit.get_name(sys))), [ModelingToolkit.NAMESPACE_SEPARATOR])
+        Symbolics.rename(x, Symbol(new_name))
+    else 
+        return x
+    end
+end
+
+function substitute_namespaced(sys::ModelingToolkit.AbstractSystem, rules::Union{Vector{<:Pair}, Dict})
+    if ModelingToolkit.has_continuous_domain(sys) && ModelingToolkit.get_continuous_events(sys) !== nothing &&
+       !isempty(ModelingToolkit.get_continuous_events(sys)) ||
+       ModelingToolkit.has_discrete_events(sys) && ModelingToolkit.get_discrete_events(sys) !== nothing &&
+       !isempty(ModelingToolkit.get_discrete_events(sys))
+        @warn "`substitute` only supports performing substitutions in equations. This system has events, which will not be updated."
+    end
+    if ModelingToolkit.keytype(eltype(rules)) <: Symbol
+        dict = ModelingToolkit.todict(rules)
+        systems = ModelingToolkit.get_systems(sys)
+        # post-walk to avoid infinite recursion
+        @set! sys.systems = map(sys->substitute_namespaced(sys, dict), systems)
+        ModelingToolkit.something(get(rules, nameof(sys), nothing), sys)
+    elseif sys isa ODESystem
+        rules = ModelingToolkit.todict(filter(r->!isnothing(r[1]), map(r -> denamespace(sys, Symbolics.unwrap(r[1])) => denamespace(sys, Symbolics.unwrap(r[2])), collect(rules))))
+        @show rules ModelingToolkit.get_name(sys)
+        eqs = expand_derivatives.(ModelingToolkit.fast_substitute(ModelingToolkit.get_eqs(sys), rules))
+        pdeps = ModelingToolkit.fast_substitute(ModelingToolkit.get_parameter_dependencies(sys), rules)
+        defs = Dict(ModelingToolkit.fast_substitute(k, rules) => ModelingToolkit.fast_substitute(v, rules)
+        for (k, v) in ModelingToolkit.get_defaults(sys))
+        guess = Dict(ModelingToolkit.fast_substitute(k, rules) => ModelingToolkit.fast_substitute(v, rules)
+        for (k, v) in ModelingToolkit.get_guesses(sys))
+        subsys = map(s -> substitute_namespaced(s, rules), ModelingToolkit.get_systems(sys))
+        @show expand_derivatives.(eqs)
+        ODESystem(eqs, ModelingToolkit.get_iv(sys); name = nameof(sys), defaults = defs,
+            guesses = guess, parameter_dependencies = pdeps, systems = subsys)
+    else
+        error("substituting symbols is not supported for $(typeof(sys))")
+    end
+end
+
+
+
+
 function trajopt(
     sys, tspan, N, given_params, initial_guess,
     ic, running_cost, terminal_cost, 
@@ -54,21 +136,35 @@ function trajopt(
         D(l) ~ running_cost,
         D(y) ~ sum(max.(0.0, g) .^ 2) + sum(h .^ 2)
     ]
+    @show running_cost
     augmented_system = ODESystem(eqs, t, systems=[sys], name=:augmented_system)
-    tsys = structural_simplify(augmented_system)
+    exsys = structural_simplify(augmented_system)
+    tsys = exsys
+    #=
+    augsys = complete(augmented_system)
+    @parameters α[1:length(unknowns(exsys))]
+    augsys = expand_derivatives.(substitute.(equations(exsys), (Dict(Symbolics.scalarize(unknowns(exsys) .=> α .* unknowns(exsys))), )))
+    for eq in augsys
+    @show eq
+    end
+    throw("hi")
+    =#
+
     terminal_cost_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, terminal_cost))
     terminal_cstr_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, Ph))
-    params = ModelingToolkit.MTKParameters(tsys, given_params)
-    tunable, repack, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
-    upd_start = setu(tsys, unknowns(tsys))
 
     get_cost = getu(tsys, tsys.l)
     upd_cost = setu(tsys, tsys.l)
 
     iguess = ModelingToolkit.varmap_to_vars(initial_guess, unknowns(tsys); defaults=Dict(unknowns(tsys) .=> (zeros(N), )), promotetoconcrete=false)
+    @show iguess unknowns(tsys) initial_guess
     iguess = collect(reduce(hcat, iguess)')
     base_prob = ODEProblem(tsys, unknowns(tsys) .=> iguess[:, 1], (0.0, 1.0), given_params; dtmax = 0.01)
     nunk = length(unknowns(tsys))
+    
+    params = parameter_values(base_prob)
+    tunable, repack, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
+    upd_start = setu(tsys, unknowns(tsys))
 
     function linearize(inp)
         neltype = eltype(inp)
@@ -147,10 +243,12 @@ function trajopt(
 
         @variable(model, L)
         @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
-        @objective(model, Min, 1000*μ + r*ηₚ +500*ν + L)
+        wₘ=1000
+        wₙ=50
+        @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + L)
         optimize!(model)
 
-        est_cost = 1000*value(μ) + 500*value(ν) + value(L) # the linearized cost estimate from the last iterate
+        est_cost = wₘ*value(μ) + wₙ*value(ν) + value(L) # the linearized cost estimate from the last iterate
         xref_candidate = xref .+ value.(δx)
         uref_candidate = uref .+ value.(δu)
         res_candidate = linearize(xref_candidate, uref_candidate)
@@ -161,7 +259,7 @@ function trajopt(
         #@show actual
         lin_err = actual .- reshape(xref_candidate[:, 2:N], :)
         #@show lin_err
-        actual_cost = 1000*norm(lin_err, 1) + 500*abs(res_candidate.value[end]) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
+        actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
         push!(costs, est_cost)
         push!(rcosts, actual_cost)
         dk = last_cost - actual_cost
@@ -177,7 +275,7 @@ function trajopt(
             continue # reject the step
         end
         
-        if maximum(abs.(xref .- xref_candidate)) < 1e-4 && maximum(abs.(uref .- uref_candidate)) < 1e-4
+        if maximum(abs.(xref .- xref_candidate)) < 1e-6 && maximum(abs.(uref .- uref_candidate)) < 1e-6
             break # done
         end
         res = res_candidate # accept the step
@@ -202,5 +300,5 @@ function trajopt(
         last_cost = actual_cost
         #sleep(0.5)
     end
-    return (uhist, xhist, whist, costs, rcosts, delta_lin_hist, linearize)
+    return (uhist, xhist, whist, costs, rcosts, delta_lin_hist, linearize, unknowns(tsys), tunable_parameters(tsys))
 end

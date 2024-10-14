@@ -10,6 +10,13 @@ import MathOptInterface as MOI
 using ModelingToolkit: t_nounits as t, D_nounits as D
 using ModelingToolkitStandardLibrary, ModelingToolkitStandardLibrary.Blocks
 
+struct TimeDilation end 
+Symbolics.option_to_metadata_type(::Val{:dilation}) = TimeDilation
+function isdilation(x, default = false)
+    p = Symbolics.getparent(x, nothing)
+    p === nothing || (x = p)
+    Symbolics.getmetadata(x, TimeDilation, default)
+end
 
 struct RelevantTime end
 Symbolics.option_to_metadata_type(::Val{:relevant_time}) = RelevantTime
@@ -21,7 +28,7 @@ end
 
 Symbolics.@register_symbolic get_sampled_data_internal(t::Float64, buffer::Vector{Float64}, dt, circular_buffer)
 function get_sampled_data_internal(a, b, c, d)
-    ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, collect(b), convert(eltype(b), c), d)
+    ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, (b), convert(eltype(b), c), d)
 end
 @component function first_order_hold(; name, N, dt)
     syms = [Symbol("val$i") for i=1:N]
@@ -39,18 +46,6 @@ end
 
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
-function filter_rules(rules::Dict, namespace::Symbol)
-    result = Dict()
-    for k in keys(rules)
-        path = split(string(k), ModelingToolkit.NAMESPACE_SEPARATOR)
-        if length(path) <= 1 || path[1] != string(namespace)
-            continue 
-        end
-        result[Symbol(join(path[2:end], ModelingToolkit.NAMESPACE_SEPARATOR))] = rules[k]
-    end
-    @show result
-    return result 
-end
 
 denamespace(sys, x::AbstractVector) = map(v -> denamespace(sys, v), x)
 function denamespace(sys, x)
@@ -85,7 +80,6 @@ function denamespace(sys, x)
         return x
     end
 end
-
 function substitute_namespaced(sys::ModelingToolkit.AbstractSystem, rules::Union{Vector{<:Pair}, Dict})
     if ModelingToolkit.has_continuous_domain(sys) && ModelingToolkit.get_continuous_events(sys) !== nothing &&
        !isempty(ModelingToolkit.get_continuous_events(sys)) ||
@@ -134,7 +128,7 @@ function trajopt(
     end
     eqs = [
         D(l) ~ running_cost,
-        D(y) ~ sum(max.(0.0, g) .^ 2) + sum(h .^ 2)
+        D(y) ~ sum((max.(0.0, g)) .^ 2) + sum(h .^ 2)
     ]
     @show running_cost
     augmented_system = ODESystem(eqs, t, systems=[sys], name=:augmented_system)
@@ -165,6 +159,9 @@ function trajopt(
     params = parameter_values(base_prob)
     tunable, repack, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
     upd_start = setu(tsys, unknowns(tsys))
+
+    tparams = tunable_parameters(tsys)
+    dil = findfirst(isdilation, tparams)
 
     function linearize(inp)
         neltype = eltype(inp)
@@ -214,7 +211,7 @@ function trajopt(
 
     last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
     @show tic
-    for i=1:100
+    for i=1:300
         model = Model(Clarabel.Optimizer)
         set_optimizer_attribute(model, "verbose", false)
         @variable(model, δx[1:nunk,1:N])
@@ -225,14 +222,27 @@ function trajopt(
         @constraint(model, reshape(δx[:, 1], :) .== tic .- reshape(xref[:, 1], :))
         #@constraint(model, reshape(δx[3:6, end], :) .== [0.0, 0.0, 1.0, 1.0] .- reshape(xref[3:6, end], :))
         # TODO
-        @constraint(model, δu + uref .<= 1.0)
-        @constraint(model, -1.0 .<= δu + uref)
+        for i=1:nparams
+            if dil !== nothing && i == dil 
+                continue 
+            end
+            @constraint(model, δu[i] + uref[i] <= 1.0)
+            @constraint(model, -1.0 <= δu[i] + uref[i])
+        end
+        @constraint(model, δx[4:end,N] .+ xref[4:end,N] .== [0.0,0.0,0.0,1.0,0.0,0.0,0.0,0,0,0,0,0,0])
         
         @variable(model, μ)
         @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
         
         @variable(model, ηₚ)
         @constraint(model, [ηₚ; 1.0; reshape(δx, :); reshape(δu, :)] ∈ MOI.RotatedSecondOrderCone(length(reshape(δx, :)) + length(reshape(δu, :)) + 2))
+
+        @variable(model, ηₗ)
+        @constraint(model, ηₗ>=0.0)
+        if dil !== nothing 
+            @constraint(model, δu[dil] <= ηₗ)
+            @constraint(model, -ηₗ <= δu[dil])
+        end
 
         #=
         @variable(model, ηₙ) # terminal constraint trust region
@@ -245,12 +255,14 @@ function trajopt(
         @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
         wₘ=1000
         wₙ=50
-        @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + L)
+        wₗ=1
+        @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + wₗ*ηₗ + L)
         optimize!(model)
 
         est_cost = wₘ*value(μ) + wₙ*value(ν) + value(L) # the linearized cost estimate from the last iterate
         xref_candidate = xref .+ value.(δx)
         uref_candidate = uref .+ value.(δu)
+        @show uref[dil] value.(δu)[dil]
         res_candidate = linearize(xref_candidate, uref_candidate)
         @show value(μ) value(ν) value(L) value(ηₚ) 0.5*sum(value.([reshape(δx, :); reshape(δu, :)])).^2
         push!(delta_lin_hist, res_candidate.derivs[1])
@@ -269,13 +281,14 @@ function trajopt(
         @show norm(lin_err, 1) abs(res_candidate.value[end]) get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
         @show ρᵏ actual_cost est_cost last_cost
         if ρᵏ < ρ₀ # it's gotten worse by too much, increase the penalty by α
-            println("REJECT $r try $(r*α)")
+            println("REJECT $i $r try $(r*α)")
             r *= α
             #sleep(0.5)
             continue # reject the step
         end
         
         if maximum(abs.(xref .- xref_candidate)) < 1e-6 && maximum(abs.(uref .- uref_candidate)) < 1e-6
+            println("DONE < tol")
             break # done
         end
         res = res_candidate # accept the step
@@ -284,13 +297,13 @@ function trajopt(
         xref = xref_candidate
         uref = uref_candidate
         if ρᵏ < ρ₁# it's gotten worse by too much (but acceptable), increase the penalty by α
-            println("OK, CONTRACT $r to $(r*α)")
+            println("OK $i, CONTRACT $r to $(r*α)")
             r *= α
         elseif ρᵏ < ρ₂
-            println("OK $r")
+            println("OK $i $r")
             # it's FINE go again 
         else
-            println("OK, EXPAND $r TO $(r/β)")
+            println("OK $i, EXPAND $r TO $(r/β)")
             # it hasn't gotten good enough decrease the penalty by a factor of β
             r /= β
         end

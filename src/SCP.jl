@@ -7,6 +7,8 @@ using ForwardDiff, ComponentArrays, DiffResults, RuntimeGeneratedFunctions
 using JuMP, Clarabel, Ipopt
 import MathOptInterface as MOI
 
+using SparseConnectivityTracer, SparseDiffTools
+
 using ModelingToolkit: t_nounits as t, D_nounits as D
 using ModelingToolkitStandardLibrary, ModelingToolkitStandardLibrary.Blocks
 
@@ -26,22 +28,76 @@ function reltime(x, default = (-Inf,Inf))
     Symbolics.getmetadata(x, RelevantTime, default)
 end
 
+
+
+function ModelingToolkitStandardLibrary.Blocks.linear_interpolation(x1::SparseConnectivityTracer.GradientTracer, x2::Real, t1::Real, t2::Real, t)
+    if t1 != t2
+        slope = (x2 - x1) / (t2 - t1)
+        intercept = x1 - slope * t1
+
+        return slope * t + intercept
+    else
+        return x2
+    end
+end
+function ModelingToolkitStandardLibrary.Blocks.get_sampled_data(t,
+        buffer::AbstractArray{T},
+        dt,
+        circular_buffer = true) where {T <: Real,}
+    if t < 0
+        t = zero(t)
+    end
+
+    if isempty(buffer)
+        if T <: AbstractFloat
+            return T(NaN)
+        else
+            return zero(T)
+        end
+    end
+
+    i1 = floor(Int, t / dt) + 1 #expensive
+    i2 = i1 + 1
+
+    t1 = (i1 - 1) * dt
+    x1 = @inbounds buffer[i1]
+
+    if t == t1
+        return x1
+    else
+        n = length(buffer)
+
+        if circular_buffer
+            i1 = (i1 - 1) % n + 1
+            i2 = (i2 - 1) % n + 1
+        else
+            if i2 > n
+                i2 = n
+                i1 = i2 - 1
+            end
+        end
+
+        t2 = (i2 - 1) * dt
+        x2 = @inbounds buffer[i2]
+        return ModelingToolkitStandardLibrary.Blocks.linear_interpolation(x1, x2, t1, t2, t)
+    end
+end
 Symbolics.@register_symbolic get_sampled_data_internal(t::Float64, buffer::Vector{Float64}, dt, circular_buffer)
 function get_sampled_data_internal(a, b, c, d)
-    ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, (b), convert(eltype(b), c), d)
+    ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, (b), c #= convert(eltype(b), c) =#, d)
 end
 @component function first_order_hold(; name, N, dt)
     syms = [Symbol("val$i") for i=1:N]
-    params = [first(@parameters $sym = 0.0, [tunable = true, relevant_time = ((i-1)*dt,i*dt)]) for (i, sym) in enumerate(syms)]
+    #params = [first(@parameters $sym = 0.0, [tunable = true, relevant_time = ((i-1)*dt,i*dt)]) for (i, sym) in enumerate(syms)]
     @parameters vals[1:N]=zeros(N) 
     systems = @named begin
         output = RealOutput()
     end
     eqs = [
-        output.u ~ ifelse(t < dt*N, get_sampled_data_internal(t, vals, dt, false), params[end])
+        output.u ~ ifelse(t < dt*N, get_sampled_data_internal(t, vals, dt, false), vals[end])
     ]
-    pdeps = [vals ~ params]
-    return ODESystem(eqs, t, [], [[vals]; params]; name, systems, continuous_events = [t % dt ~ 0], parameter_dependencies = pdeps)
+    #pdeps = [vals ~ params]
+    return ODESystem(eqs, t, [], [vals]; name, systems #=continuous_events = [t % dt ~ 0],=#)
 end
 
 RuntimeGeneratedFunctions.init(@__MODULE__)
@@ -163,29 +219,88 @@ function trajopt(
     tparams = tunable_parameters(tsys)
     dil = findfirst(isdilation, tparams)
 
-    function linearize(inp)
-        neltype = eltype(inp)
-        params_ = SciMLStructures.replace(SciMLStructures.Tunable(), params, inp.params)
-        function segment(prob, i, repeat)
-            nu0 = neltype.(prob.u0)
-            upd_start(nu0, inp.u0[:, i])
-            return remake(prob, u0=nu0, p=params_, tspan=((i-1)/(N-1), (i)/(N-1)) .* dtime .+ ti)
+    function lnz(;opts...)
+        return function (inp)
+            neltype = eltype(inp)
+            params_ = SciMLStructures.replace(SciMLStructures.Tunable(), params, inp.params)
+            function segment(prob, i, repeat)
+                nu0 = neltype.(prob.u0)
+                upd_start(nu0, inp.u0[:, i])
+                return remake(prob, u0=nu0, p=params_, tspan=((i-1)/(N-1), (i)/(N-1)) .* dtime .+ ti)
+            end
+            ensemble = EnsembleProblem(base_prob, prob_func=segment, safetycopy=false)
+            sim = solve(ensemble, Tsit5(), trajectories=N-1;save_everystep=false, opts...)
+            final_state = collect(last(sim)[end]) 
+            upd_cost(final_state, get_cost(final_state) + terminal_cost_fun(inp.u0[:,N], params_, last(sim).t))
+            terminal_cstr_value = terminal_cstr_fun(inp.u0[:,N], params, last(sim).t)
+            #@show terminal_cstr_value
+            return [reduce(vcat, map(s->s.u[end], sim[1:end-1])); final_state; terminal_cstr_value]
         end
-        ensemble = EnsembleProblem(base_prob, prob_func=segment, safetycopy=false)
-        sim = solve(ensemble, Tsit5(), trajectories=N-1)
-        final_state = collect(last(sim)[end]) 
-        upd_cost(final_state, get_cost(final_state) + terminal_cost_fun(inp.u0[:,N], params, last(sim).t))
-        terminal_cstr_value = terminal_cstr_fun(inp.u0[:,N], params, last(sim).t)
-        #@show terminal_cstr_value
-        return [reduce(vcat, map(s->s.u[end], sim[1:end-1])); final_state; terminal_cstr_value]
+    end
+    linearize(inp) = lnz()(inp)
+
+
+    function sparsity_linearize(states, pars)
+        detector = TracerSparsityDetector();
+        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
+        res = zeros(nunk * (N-1) + 1);
+        Float64.(jacobian_sparsity(lnz(adaptive=false, dt=0.001, unstable_check=(dt,u,p,t) -> false),linpoint,detector))
     end
 
+    sparsity_pattern = sparsity_linearize(collect(iguess[:, 1:N]), collect(tunable))
+    colorvec = matrix_colors(sparsity_pattern)
+
     function linearize(states, pars)
+#=
+        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
+        value = collect(linearize(linpoint))
+=#
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         res = DiffResults.JacobianResult(zeros(nunk * (N-1) + 1), linpoint);
         ForwardDiff.jacobian!(res, linearize, linpoint)
+        #=
+        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
+        value2 = collect(linearize(linpoint))
+        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
+        jac = forwarddiff_color_jacobian(lnz(), linpoint, colorvec = colorvec, sparsity=sparsity_pattern)
+        global result_sparse = jac
+        global result_dense = res.derivs[1]
+
+        global value_dense = res.value
+        global value_sparse = value
+        global value_sparse2 = value2
+        =#
         return res
+        
+        #return (value=value, derivs=(jac, ))
     end
+
+    return Dict(
+        [:ic => ic, 
+        :tsys => tsys, 
+        :avars => [l, y],
+        :linearize => linearize, 
+        :iguess => iguess,
+        :tunable => tunable,
+        :get_cost => get_cost,
+        :N => N,
+        :dil => dil, 
+        :jac_sparsity => sparsity_pattern,
+        :colorvec => colorvec
+        ])
+end
+function do_trajopt(prb; maxsteps=300)
+    ic = prb[:ic]
+    tsys = prb[:tsys]
+    l, y = prb[:avars]
+    linearize = prb[:linearize]
+    iguess = prb[:iguess]
+    tunable = prb[:tunable]
+    get_cost = prb[:get_cost]
+    N = prb[:N]
+    dil = prb[:dil]
+    nunk = length(unknowns(tsys))
+
 
     tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0, y => 0.0]))
     xref = iguess
@@ -211,7 +326,7 @@ function trajopt(
 
     last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
     @show tic
-    for i=1:300
+    for i=1:maxsteps
         model = Model(Clarabel.Optimizer)
         set_optimizer_attribute(model, "verbose", false)
         @variable(model, δx[1:nunk,1:N])

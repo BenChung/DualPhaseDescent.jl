@@ -20,15 +20,20 @@ body_lift = make_interp(:lift)
 body_drag = make_interp(:drag)
 body_torque = make_interp(:trq)
 
+
 struct AeroLookupTs{IT}
     itp::IT
 end
 @register_symbolic (a::AeroLookupTs)(mach, alpha)
 (a::AeroLookupTs)(mach, alpha) = a.itp(mach, alpha)
-
 body_drag_lookup = AeroLookupTs(body_drag)
 body_lift_lookup = AeroLookupTs(body_lift)
 body_torq_lookup = AeroLookupTs(body_torque)
+SparseConnectivityTracer.is_der1_arg1_zero_global(::AeroLookupTs) = false
+SparseConnectivityTracer.is_der2_arg1_zero_global(::AeroLookupTs) = false
+SparseConnectivityTracer.is_der1_arg2_zero_global(::AeroLookupTs) = false
+SparseConnectivityTracer.is_der2_arg2_zero_global(::AeroLookupTs) = false
+SparseConnectivityTracer.is_der_cross_zero_global(::AeroLookupTs) = false
 
 @register_symbolic ρ_fun(h)
 ρ_fun(h) = ρ_kg_m³(p_Pa(h), T₀_K)
@@ -49,6 +54,10 @@ function T_K_fwd(Hp_m::T, ΔT_K::Float64 = 0.0) where T
         return convert(T, ISAtmosphere.T₀_K + ΔT_K + ISAtmosphere.βT∇_K_m * ISAtmosphere.Hp_trop_m)
     end
 end
+SparseConnectivityTracer.is_der1_zero_global(::typeof(T_K_fwd)) = false
+SparseConnectivityTracer.is_der2_zero_global(::typeof(T_K_fwd)) = false
+eval(SparseConnectivityTracer.generate_code_1_to_1(:Main, T_K_fwd))
+
 
 temp_vs_alt(h) = T_K_fwd(h)
 
@@ -56,6 +65,9 @@ temp_vs_alt(h) = T_K_fwd(h)
 function sqrt_smooth(s)
     return ifelse(s == 0.0, s, sqrt(s))
 end
+SparseConnectivityTracer.is_der1_zero_global(::typeof(sqrt_smooth)) = false
+SparseConnectivityTracer.is_der2_zero_global(::typeof(sqrt_smooth)) = false
+eval(SparseConnectivityTracer.generate_code_1_to_1(:Main, sqrt_smooth))
 
 @register_symbolic atand_smooth(a::Num, b::Num)
 function atand_smooth(a,b)
@@ -118,7 +130,9 @@ function make_vehicle(;
         Symbolics.scalarize(aero_torque .~ Cm * cross(iquat(R) * [0,0,-1], ρv .* v) * norm(ρv .* v))
 
         iJz .~ iJz_dry # + iJz_delta * propellant_fraction;
-        D(m) ~ -τc*sqrt_smooth(max(sum(u.^2), 0.0)) * 50/(ISP * 9.8);
+        D(m) ~ -τc*sqrt_smooth(max(sum(u.^2), 0.0)) * 50/(ISP * 9.8); # can we make it into an inequality?
+        #D(m2) ~ -τc^2/(50/(ISP * 9.8))^2*sum(u.^2); # can we make it into an inequality?
+        # D(m) ~ cα <= sqrt(u)
 
         net_torque .~ cross(engine_offset, Symbolics.scalarize(u * 50)) .+ aero_torque;
         D.(ρω.*ω) .~ -τc.*collect(Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)));
@@ -176,11 +190,11 @@ prob = ODEProblem(ssys, [
     ssys.veh.ρpos => pos_scale
 ])
 sol = solve(prob, Tsit5(); dtmax=0.01)
-@profview for i=1:100 sol = solve(prob, Tsit5(); dtmax=0.01) end
+@profview for i=1:1000 sol = solve(prob, Tsit5(); dtmax=0.01, save_everystep=false) end
 
 lin_range_vals(i,f,n) = eachrow(reduce(hcat, LinRange(i, f, n)))
 
-@profview u,x,wh,ch,rch,dlh,lnz,unk,tp = trajopt(probsys, (0.0, 1.0), 20, 
+prb = trajopt(probsys, (0.0, 1.0), 20, 
     Dict([
         probsys.veh.ρv => vel_scale,
         probsys.veh.ρpos => pos_scale,
@@ -203,6 +217,11 @@ lin_range_vals(i,f,n) = eachrow(reduce(hcat, LinRange(i, f, n)))
     0.0, 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
     ((sum((vel_scale .* probsys.veh.v).^2))) + sum((pos_scale .* probsys.veh.pos) .^2) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .- R_final) .^2));
 
+    do_trajopt(prb; maxsteps=1);
+    do_trajopt(prb; maxsteps=10);
+@profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
+
+
 
 prob = ODEProblem(ssys, [
     ssys.veh.m => m_init
@@ -213,7 +232,7 @@ prob = ODEProblem(ssys, [
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale;
     ssys.veh.ρpos => pos_scale;
-    denamespace.((ssys, ), tp) .=> u[end]
+    denamespace.((ssys, ), tp) .=> [u[end][1], u[end][2:end][1:20], u[end][2:end][21:40], u[end][2:end][41:60]]
 ])
 sol = solve(prob, Tsit5(); dtmax=0.01)
 

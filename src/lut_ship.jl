@@ -75,3 +75,28 @@ function (a::AeroLookupTs)(x::Real, dy::D) where {P, T <: (SparseConnectivityTra
     t_out = @noinline((SparseConnectivityTracer).hessian_tracer_1_to_1(ty, is_der1_arg2_zero, is_der2_arg2_zero))
     return (SparseConnectivityTracer).Dual(p_out, t_out)
 end
+
+
+function (a::AeroLookup1DTs)(t::(SparseConnectivityTracer).GradientTracer)
+    return @noinline((SparseConnectivityTracer).gradient_tracer_1_to_1(t, false))
+end
+function (a::AeroLookup1DTs)(d::D) where {P, T <: (SparseConnectivityTracer).GradientTracer, D <: (SparseConnectivityTracer).Dual{P, T}}
+    x = (SparseConnectivityTracer).primal(d)
+    p_out = (a::AeroLookup1DTs)(x)
+    t = (SparseConnectivityTracer).tracer(d)
+    is_der1_zero = (SparseConnectivityTracer).is_der1_zero_local(a, x)
+    t_out = @noinline((SparseConnectivityTracer).gradient_tracer_1_to_1(t, is_der1_zero))
+    return (SparseConnectivityTracer).Dual(p_out, t_out)
+end
+function (a::AeroLookup1DTs)(t::(SparseConnectivityTracer).HessianTracer)
+    return @noinline((SparseConnectivityTracer).hessian_tracer_1_to_1(t, false, false))
+end
+function (a::AeroLookup1DTs)(d::D) where {P, T <: (SparseConnectivityTracer).HessianTracer, D <: (SparseConnectivityTracer).Dual{P, T}}
+    x = (SparseConnectivityTracer).primal(d)
+    p_out = (a::AeroLookup1DTs)(x)
+    t = (SparseConnectivityTracer).tracer(d)
+    is_der1_zero = (SparseConnectivityTracer).is_der1_zero_local(a, x)
+    is_der2_zero = (SparseConnectivityTracer).is_der2_zero_local(a, x)
+    t_out = @noinline((SparseConnectivityTracer).hessian_tracer_1_to_1(t, is_der1_zero, is_der2_zero))
+    return (SparseConnectivityTracer).Dual(p_out, t_out)
+end

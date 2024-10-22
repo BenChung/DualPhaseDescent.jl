@@ -247,8 +247,8 @@ function trajopt(
         Float64.(jacobian_sparsity(lnz(adaptive=false, dt=0.001, unstable_check=(dt,u,p,t) -> false),linpoint,detector))
     end
 
-    sparsity_pattern = sparsity_linearize(collect(iguess[:, 1:N]), collect(tunable))
-    colorvec = matrix_colors(sparsity_pattern)
+    #sparsity_pattern = sparsity_linearize(collect(iguess[:, 1:N]), collect(tunable))
+    #colorvec = matrix_colors(sparsity_pattern)
 
     function linearize(states, pars)
 #=
@@ -285,8 +285,8 @@ function trajopt(
         :get_cost => get_cost,
         :N => N,
         :dil => dil, 
-        :jac_sparsity => sparsity_pattern,
-        :colorvec => colorvec
+        #:jac_sparsity => sparsity_pattern,
+        #:colorvec => colorvec
         ])
 end
 function do_trajopt(prb; maxsteps=300)
@@ -344,7 +344,11 @@ function do_trajopt(prb; maxsteps=300)
             @constraint(model, δu[i] + uref[i] <= 1.0)
             @constraint(model, -1.0 <= δu[i] + uref[i])
         end
-        @constraint(model, δx[4:end,N] .+ xref[4:end,N] .== [0.0,0.0,0.0,1.0,0.0,0.0,0.0,0,0,0,0,0,0])
+        @constraint(model, δx[4:6,N] .+ xref[4:6,N] .== [0.0,0.0,0.0]) # omega
+        @constraint(model, δx[7:10,N] .+ xref[7:10,N] .== [1.0,0.0,0.0,0.0]) # R
+        #@constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # v
+        @constraint(model, δx[11:12,N] .+ xref[11:12,N] .== [0.0,0.0]) # v[1:2]
+        @constraint(model, δx[14:16,N] .+ xref[14:16,N] .== [0.0,0.0,0.0]) # pos
         
         @variable(model, μ)
         @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))

@@ -21,6 +21,61 @@ body_drag = make_interp(:drag)
 body_torque = make_interp(:trq)
 
 
+actuator_data = CSV.read("src/kerbal/control_eff.csv", DataFrame)
+act_lin = extrapolate(interpolate((actuator_data[:, :mach], ), actuator_data[:, :cl1_lin], Gridded(Linear())), Flat())
+act_const = extrapolate(interpolate((actuator_data[:, :mach], ), actuator_data[:, :cl1_const], Gridded(Linear())), Flat())
+act_scale = extrapolate(interpolate((actuator_data[:, :mach], ), actuator_data[:, :cl1_scale], Gridded(Linear())), Flat())
+
+
+
+actuator_lims = CSV.read("src/kerbal/control_lims.csv", DataFrame)
+aoa2_grp = groupby(actuator_lims, :aoa2)
+function make_lim_lut(field)
+    dfs = unstack.(collect(aoa2_grp), :mach, :aoa1, field)
+    function decompose_unstacked(df)
+        aoa_kts = parse.(Float64, names(df)[2:end])
+        mach_kts = df[:,:mach]
+        return aoa_kts,mach_kts,convert(Matrix{Float64}, Matrix(df[:,2:end]))
+    end
+    udfs = decompose_unstacked.(dfs)
+    @assert all(ud->ud[1] == udfs[1][1], udfs)
+    @assert all(ud->ud[2] == udfs[1][2], udfs)
+    aoa1_kts = udfs[1][1]
+    aoa2_kts = map(gk->gk.aoa2, keys(aoa2_grp))
+    mach_kts = udfs[1][2]
+    mat = stack(map(ud->ud[3], udfs)) # goes mach, aoa1, aoa2
+    extrapolate(interpolate((mach_kts, aoa1_kts, aoa2_kts), mat, Gridded(Linear())), Flat())
+end
+upper_lim1_lut = make_lim_lut(:upper_lim1)
+lower_lim1_lut = make_lim_lut(:lower_lim1)
+upper_lim2_lut = make_lim_lut(:upper_lim2)
+lower_lim2_lut = make_lim_lut(:lower_lim2)
+@register_symbolic remap1(mach, alpha1, alpha2, u)
+function remap1(mach, alpha1, alpha2, u)
+    upper_lim1 = upper_lim1_lut(mach, alpha1, alpha2)
+    lower_lim1 = lower_lim1_lut(mach, alpha1, alpha2)
+    return (u + 1)/2 * upper_lim1 - (1 - (u + 1)/2) * lower_lim1
+end
+@register_symbolic remap2(mach, alpha1, alpha2, u)
+function remap2(mach, alpha1, alpha2, u)
+    upper_lim2 = upper_lim2_lut(mach, alpha1, alpha2)
+    lower_lim2 = lower_lim2_lut(mach, alpha1, alpha2)
+    return (u + 1)/2 * upper_lim2 - (1 - (u + 1)/2) * lower_lim2
+end
+
+#drag1 = (act_lin * cos(alpha2) + act_const) * (act_scale * control)^2
+struct AeroLookup1DTs{IT}
+    itp::IT 
+end
+@register_symbolic (a::AeroLookup1DTs)(mach)
+(a::AeroLookup1DTs)(mach) = a.itp(mach)
+SparseConnectivityTracer.is_der1_zero_global(::AeroLookup1DTs) = false
+SparseConnectivityTracer.is_der2_zero_global(::AeroLookup1DTs) = false
+
+act_lin_lookup = AeroLookup1DTs(act_lin)
+act_const_lookup = AeroLookup1DTs(act_const)
+act_scale_lookup = AeroLookup1DTs(act_scale)
+
 struct AeroLookupTs{IT}
     itp::IT
 end
@@ -85,14 +140,17 @@ end
 @register_symbolic logme(v::Real)
 logme(v) = let _ = println(v); v end
 
+function normalize_vec(vect)
+    return vect/norm(vect)
+end
 
 function make_vehicle(; 
-    iJz_wet=[1/300.19, 1/300.19, 1/100],
-    iJz_dry=[1/300.19, 1/300.19, 1/100],
-    mdry=1000,
-    fuel_mass=1000,
+    iJz_wet=[1/797918.19, 1/797918.19, 1/8197],
+    iJz_dry=[1/444490.19, 1/444490.19, 1/3955],
+    mdry=10088,
+    fuel_mass=10088,
     engine_offset = [0, 0, -8], name)
-    @parameters kerbin_center[1:3] = [0.0,-600000,0.0], [tunable = false]
+    @parameters kerbin_center[1:3] = [0.0,0.0,-600000], [tunable = false]
     @parameters kerbin_radius = 600000.0, [tunable = false]
     @parameters iJz_delta[1:3] = iJz_wet - iJz_dry, [tunable = false]#.*u"kg" .* u"m^2")
     @parameters iJz_dry[1:3] = iJz_dry, [tunable = false]#.*u"kg" .* u"m^2")
@@ -112,7 +170,7 @@ function make_vehicle(;
     Symbolics.@variables lift_dir(t)[1:3] local_wind_vec(t)[1:3] alpha(t) accel(t)[1:3]
     Symbolics.@variables fin_force(t)[1:4, 1:3] fin1_force(t)[1:3] fin2_force(t)[1:3] fin3_force(t)[1:3] fin4_force(t)[1:3] τc(t)
     Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3]
-    Symbolics.@variables ua(t)[1:2]
+    Symbolics.@variables ua(t)[1:2] ua_mapped(t)[1:2] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
     @parameters τc [tunable = true, dilation=true]
     
     eqns = expand_derivatives.([
@@ -122,23 +180,43 @@ function make_vehicle(;
         speed_of_sound ~ mach_vs_temp(temp)
         mach ~ norm(ρv.*v)/speed_of_sound
         alpha ~ angle(v, rquat(R) * [0,0,-1]);
+        local_wind_vec .~ iquat(R) * Symbolics.scalarize(v);
+        alpha1 ~ angle_in_plane(local_wind_vec, [0,0,-1], [0,1,0]);
+        alpha2 ~ angle_in_plane(local_wind_vec, [0,0,-1], [1,0,0]);
 
         Cd ~ body_drag_lookup(mach, alpha)
         Cl ~ body_lift_lookup(mach, alpha)
         Cm ~ body_torq_lookup(mach, alpha)
-        aero_force .~ Symbolics.scalarize(Cl .* (cross(ρv .* v, cross(iquat(R) * [0,0,-1],ρv .* v))) .- Cd*norm(Symbolics.scalarize(ρv .* v))*(ρv .* v))
-        Symbolics.scalarize(aero_torque .~ Cm * cross(iquat(R) * [0,0,-1], ρv .* v) * norm(ρv .* v))
+
+        # todo: density/velocity correction
+        ua_mapped[1] ~ remap1(mach, alpha1, alpha2, ua[1])
+        ua_mapped[2] ~ remap2(mach, alpha1, alpha2, ua[2])
+        Symbolics.scalarize(aero_ctrl_lift .~ ua .* act_scale_lookup(mach))
+        aero_ctrl_drag ~ 
+            act_lin_lookup(mach) * sum([cosd(alpha2), cosd(alpha1)] .* aero_ctrl_lift.^2) +
+            act_const_lookup(mach) * sum(aero_ctrl_lift.^2)
+        Symbolics.scalarize(lift_dir1 .~ normalize_vec(cross(rquat(R) * [0,1,0], ρv .* v)))
+        Symbolics.scalarize(lift_dir2 .~ normalize_vec(cross(ρv .* v, cross(rquat(R) * [0,1,0], ρv .* v))))
+        Symbolics.scalarize(aero_ctrl_force .~ 1000 * (lift_dir1 .* aero_ctrl_lift[1] .+ lift_dir2 .* aero_ctrl_lift[2] .- aero_ctrl_drag * v/norm(v)))
+
+        aero_force .~ Symbolics.scalarize(
+            Cl .* 1000 .* (cross(ρv .* v, cross(iquat(R) * [0,0,-1],ρv .* v)))
+            .- Cd * 1000 *norm(Symbolics.scalarize(ρv .* v))*(ρv .* v)
+            .+ aero_ctrl_force) # Cl/Cd come out in kN 
+
+        Symbolics.scalarize(body_torque .~ Cm * 1000 * cross([0,0,-1], iquat(R) * Symbolics.scalarize(ρv .* v)) * norm(ρv .* v))
+        Symbolics.scalarize(ctrl_torque .~ cross([0,0,9.18], iquat(R) * Symbolics.scalarize(aero_ctrl_force)))
 
         iJz .~ iJz_dry # + iJz_delta * propellant_fraction;
-        D(m) ~ -τc*sqrt_smooth(max(sum(u.^2), 0.0)) * 50/(ISP * 9.8); # can we make it into an inequality?
+        D(m) ~ -τc*sqrt_smooth(max(sum(u.^2), 0.0)) * 50/(ISP * 9.8 * mdry); # can we make it into an inequality?
         #D(m2) ~ -τc^2/(50/(ISP * 9.8))^2*sum(u.^2); # can we make it into an inequality?
         # D(m) ~ cα <= sqrt(u)
 
-        net_torque .~ cross(engine_offset, Symbolics.scalarize(u * 50)) .+ aero_torque;
-        D.(ρω.*ω) .~ -τc.*collect(Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)));
+        net_torque .~ cross(engine_offset, Symbolics.scalarize(u * 50)) .+ ctrl_torque .+ body_torque;
+        D.(ρω.*ω) .~ -τc.*collect(Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)) .+ ω);
         D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(ρR.*R), Symbolics.scalarize(ρω.*ω));
 
-        Symbolics.scalarize(D.(ρv.*v) .~ τc.*([0, 0, -9.8].+ (iquat(R) * Symbolics.scalarize(u) * 50 .+ aero_force))); #  ./ m seems to add a lot of slowness
+        Symbolics.scalarize(D.(ρv.*v) .~ τc.*([0, 0, -9.8] .+ (iquat(R) * Symbolics.scalarize(u) * 50) .+ aero_force/mdry)); #  ./ m seems to add a lot of slowness
         Symbolics.scalarize(D.(ρpos.*pos) .~ τc.*(v .* ρv));
     ])
     return ODESystem(expand_derivatives.(Symbolics.scalarize.(eqns)), t; name = name)
@@ -149,12 +227,17 @@ function build_example_problem()
     @named inputx = first_order_hold(N = 20, dt=0.05)
     @named inputy = first_order_hold(N = 20, dt=0.05)
     @named inputz = first_order_hold(N = 20, dt=0.05)
+
+    @named input_fin1 = first_order_hold(N=20, dt=0.05)
+    @named input_fin2 = first_order_hold(N=20, dt=0.05)
         
     @named model = ODESystem([
-        veh.u[1] ~ inputx.output.u, 
-        veh.u[2] ~ inputy.output.u, 
-        veh.u[3] ~ inputz.output.u], t,
-        systems = [veh, inputx, inputy, inputz])
+        veh.u[1] ~ 0, #inputx.output.u, 
+        veh.u[2] ~ 0, #inputy.output.u, 
+        veh.u[3] ~ 0, #inputz.output.u,
+        veh.ua[1] ~ input_fin1.output.u,
+        veh.ua[2] ~ input_fin2.output.u], t,
+        systems = [veh, input_fin1, input_fin2])
     return model # structural_simplify(model)
 end
 mdry = 1000.0
@@ -165,11 +248,11 @@ ssys = structural_simplify(probsys)
 
 tf_max = 15.0
 tf_min = 0.25
-pos_init = [50.0,50.0,600.0]
+pos_init = [50.0,50.0,2000.0]
 vel_init = [0,0,-100.0]
 R_init = [1.0,0,0,0]
 ω_init = [0,0,0.0]
-m_init = (mdry + fuel_mass*0.1)/mdry
+m_init = (10088 + 10088)/10088
 
 pos_final = [0,0,0.0]
 vel_final = [0,0,0.0]
@@ -184,13 +267,36 @@ prob = ODEProblem(ssys, [
     ssys.veh.R => R_init
     ssys.veh.pos => pos_init ./ pos_scale
     ssys.veh.v => vel_init ./ vel_scale
-    ssys.veh.τc => 15.0
+    ssys.veh.τc => 35.0
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale
     ssys.veh.ρpos => pos_scale
+    ssys.input_fin1.vals => -0.1*ones(20)
+    ssys.input_fin2.vals => 0.0*ones(20) # 0.0*ones(20) #
 ])
-sol = solve(prob, Tsit5(); dtmax=0.01)
+sol = solve(prob, Tsit5(); dtmax=0.0001)
 @profview for i=1:1000 sol = solve(prob, Tsit5(); dtmax=0.01, save_everystep=false) end
+
+idx = 5000
+arrows(Point3.([
+    zeros(3),
+    zeros(3),
+    zeros(3),
+    zeros(3),
+    zeros(3),
+    zeros(3),
+    zeros(3)
+    ]), Point3.([
+        collect(rquat(sol[ssys.veh.R][idx]) * [0,0,1]),
+        collect(rquat(sol[ssys.veh.R][idx]) * [0,1,0]),
+        collect(rquat(sol[ssys.veh.R][idx]) * [1,0,0]),
+        collect(iquat(sol[ssys.veh.R][idx]) * normalize_vec(sol[ssys.veh.ctrl_torque][idx])),
+        collect(normalize_vec(sol[ssys.veh.v][idx])),
+    collect(sol[ssys.veh.lift_dir1][idx]),
+    collect(sol[ssys.veh.lift_dir2][idx]),
+    ]),
+    arrowcolor = [0.0,0.15, 0.25, 0.4, 0.5, 0.75, 1.0],
+    linecolor = [0.0,0.15, 0.25, 0.4, 0.5, 0.75, 1.0])
 
 lin_range_vals(i,f,n) = eachrow(reduce(hcat, LinRange(i, f, n)))
 
@@ -198,12 +304,12 @@ prb = trajopt(probsys, (0.0, 1.0), 20,
     Dict([
         probsys.veh.ρv => vel_scale,
         probsys.veh.ρpos => pos_scale,
-        probsys.veh.τc => 5.0
+        probsys.veh.τc => 1.0
     ]), 
     Dict(
         [probsys.veh.m => collect(LinRange(m_init, m_init, 20));
         Symbolics.scalarize(probsys.veh.pos .=> lin_range_vals(pos_init ./ pos_scale, pos_final, 20));
-        Symbolics.scalarize(probsys.veh.v .=> lin_range_vals(vel_init ./ vel_scale, vel_final, 20));
+        Symbolics.scalarize(probsys.veh.v .=> lin_range_vals(vel_init ./ vel_scale, vel_final ./ vel_scale, 20));
         Symbolics.scalarize(probsys.veh.R .=> lin_range_vals(R_init, R_final, 20));
         Symbolics.scalarize(probsys.veh.ω .=> lin_range_vals(ω_init, ω_final, 20))
         ]), 
@@ -213,14 +319,13 @@ prb = trajopt(probsys, (0.0, 1.0), 20,
     probsys.veh.R => R_init,
     probsys.veh.ω => ω_init
     ], 
-    50*sum([probsys.veh.u[1], probsys.veh.u[2], probsys.veh.u[3]].^2), 0.0, 
+    100*sum([probsys.veh.ua[1], probsys.veh.ua[2]].^2), 0.0, 
     0.0, 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
-    ((sum((vel_scale .* probsys.veh.v).^2))) + sum((pos_scale .* probsys.veh.pos) .^2) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .- R_final) .^2));
+    ((sum((vel_scale[1:2] .* probsys.veh.v[1:2]).^2))) + sum((pos_scale .* probsys.veh.pos) .^2) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .- R_final) .^2));
 
     do_trajopt(prb; maxsteps=1);
-    do_trajopt(prb; maxsteps=10);
+    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
 @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
-
 
 
 prob = ODEProblem(ssys, [
@@ -232,14 +337,44 @@ prob = ODEProblem(ssys, [
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale;
     ssys.veh.ρpos => pos_scale;
-    denamespace.((ssys, ), tp) .=> [u[end][1], u[end][2:end][1:20], u[end][2:end][21:40], u[end][2:end][41:60]]
+    denamespace.((ssys, ), tp) .=> [
+        u[end][1], #10*u[end][1], 
+        u[end][2:21], 
+        u[end][22:end]]
 ])
-sol = solve(prob, Tsit5(); dtmax=0.01)
+sol = solve(prob, Tsit5(); dtmax=0.001)
 
-lines(sol.t, norm.(sol[ssys.veh.aero_torque]))
+lines(sol.t, (sol[ssys.veh.ua_mapped[2]]))
+lines!(sol.t, (sol[ssys.veh.ua_mapped[1]]))
 lines(Point3.(sol[ssys.veh.pos]))
 
 
+pos_init_2 = [0, 40000, 30000]
+vel_init_2 = [0, -1200, -750]
+rot_axis = cross(vel_init_2, [0,0,-1])/norm(vel_init_2)
+rot = QuatRotation(AngleAxis(-asin(norm(rot_axis)), rot_axis..., true))
+R_init_2 = [rot.q.s, rot.q.v1, rot.q.v2, rot.q.v3]
+prob2 = ODEProblem(ssys, [
+    ssys.veh.m => m_init
+    ssys.veh.ω => ω_init
+    ssys.veh.R => R_init_2
+    ssys.veh.pos => pos_init_2 ./ pos_scale
+    ssys.veh.v => vel_init_2 ./ vel_scale
+], (0.0, 1.0), [
+    ssys.veh.ρv => vel_scale;
+    ssys.veh.ρpos => pos_scale;
+    denamespace.((ssys, ), tp) .=> [
+        45, #10*u[end][1], 
+        0.0 * ones(20), 
+        0.0*ones(20)]
+])
+sol = solve(prob2, Tsit5(); dtmax=0.001)
+
+f=Figure()
+ax = Makie.Axis(f[1,1])
+lines!(ax, sol.t, sol[ssys.veh.pos[2]])
+lines!(ax, sol.t, sol[ssys.veh.pos[3]])
+f
 delta_max = 25.0
 
 

@@ -248,13 +248,8 @@ ssys = structural_simplify(probsys)
 
 tf_max = 15.0
 tf_min = 0.25
-pos_init = [0.0,0.0,4000.0]
-vel_init = [0,-100,-100.0]
-
-# R: B -> I
-up_vec = [0.0,0.0,1.0]
-rot_init = cross(normalize_vec(up_vec), normalize_vec(vel_init))
-qur = QuatRotation((AngleAxis(-asin(norm(rot_init)), rot_init...))).q.s
+pos_init = [100.0,100.0,4000.0]
+vel_init = [0,0,-100.0]
 R_init = [1.0,0,0,0]
 ω_init = [0,0,0.0]
 m_init = (10088 + 10088)/10088

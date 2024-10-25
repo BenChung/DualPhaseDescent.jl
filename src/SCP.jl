@@ -173,7 +173,8 @@ end
 function trajopt(
     sys, tspan, N, given_params, initial_guess,
     ic, running_cost, terminal_cost, 
-    g, h, Ph
+    g, h, Ph,
+    convex_mod=nothing
 )
     t = sys.iv
     (ti, tf) = tspan
@@ -285,6 +286,7 @@ function trajopt(
         :get_cost => get_cost,
         :N => N,
         :dil => dil, 
+        :convex_mod => convex_mod
         #:jac_sparsity => sparsity_pattern,
         #:colorvec => colorvec
         ])
@@ -297,6 +299,7 @@ function do_trajopt(prb; maxsteps=300)
     iguess = prb[:iguess]
     tunable = prb[:tunable]
     get_cost = prb[:get_cost]
+    convex_mod = prb[:convex_mod]
     N = prb[:N]
     dil = prb[:dil]
     nunk = length(unknowns(tsys))
@@ -344,8 +347,12 @@ function do_trajopt(prb; maxsteps=300)
             @constraint(model, δu[i] + uref[i] <= 1.0)
             @constraint(model, -1.0 <= δu[i] + uref[i])
         end
+
+        if !isnothing(convex_mod)
+            convex_mod(model, δx, xref, δu, uref)
+        end
         @constraint(model, δx[4:6,N] .+ xref[4:6,N] .== [0.0,0.0,0.0]) # omega
-        @constraint(model, δx[7:10,N] .+ xref[7:10,N] .== [1.0,0.0,0.0,0.0]) # R
+        @constraint(model, δx[7:10,N] .+ xref[7:10,N] .== [2.0,0.0,0.0,0.0]) # R
         #@constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # v
         @constraint(model, δx[11:12,N] .+ xref[11:12,N] .== [0.0,0.0]) # v[1:2]
         @constraint(model, δx[14:16,N] .+ xref[14:16,N] .== [0.0,0.0,0.0]) # pos
@@ -355,7 +362,7 @@ function do_trajopt(prb; maxsteps=300)
         
         @variable(model, ηₚ)
         @constraint(model, [ηₚ; 1.0; reshape(δx, :); reshape(δu, :)] ∈ MOI.RotatedSecondOrderCone(length(reshape(δx, :)) + length(reshape(δu, :)) + 2))
-
+        
         @variable(model, ηₗ)
         @constraint(model, ηₗ>=0.0)
         if dil !== nothing 
@@ -374,7 +381,7 @@ function do_trajopt(prb; maxsteps=300)
         @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
         wₘ=1000
         wₙ=50
-        wₗ=1
+        wₗ=0.5
         @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + wₗ*ηₗ + L)
         optimize!(model)
 

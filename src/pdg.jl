@@ -93,9 +93,17 @@ SparseConnectivityTracer.is_der_cross_zero_global(::AeroLookupTs) = false
 @register_symbolic ρ_fun(h)
 ρ_fun(h) = ρ_kg_m³(p_Pa(h), T₀_K)
 
+function mkrot(R)
+    if length(R) == 4
+        return QuatRotation(R[1], R[2], R[3], R[4], false)
+    elseif length(R) ==2
+        return RotXY(R[1], R[2]) 
+    end
+end
+rquat(R) = mkrot(R)
+iquat(R) = inv(mkrot(R))
 
-rquat(R) = QuatRotation(R[1], R[2], R[3], R[4], false)
-iquat(R) = QuatRotation(R[1], -R[2], -R[3], -R[4], false)
+Rotations.kinematics(r::RotXY, ω) = ω
 Base.:/(q::Quaternions.Quaternion, x::Num) = Quaternions.Quaternion(q.s / x, q.v1 / x, q.v2 / x, q.v3 / x)
 
 @register_symbolic mach_vs_temp(T_K)
@@ -160,10 +168,10 @@ function make_vehicle(;
     @parameters fin_offset[1:3] = [0, 0, 1], [tunable = false]
     @parameters ISP = 300, [tunable = false] fuel_mass = fuel_mass, [tunable = false] mdry = mdry, [tunable = false]
     @parameters speed_of_sound = 340, [tunable = false] ρ=1.225, [tunable = false]
-    @parameters ρω[1:3]=ones(3), [tunable = false] ρR[1:4]=ones(4), [tunable = false] ρv[1:3]=ones(3), [tunable = false] ρpos[1:3]=ones(3), [tunable = false]
+    @parameters ρω[1:2]=ones(3), [tunable = false] ρR[1:2]=ones(2), [tunable = false] ρv[1:3]=ones(3), [tunable = false] ρpos[1:3]=ones(3), [tunable = false]
 
     Symbolics.@variables pos(t)[1:3] v(t)[1:3] m(t) propellant_fraction(t)
-    Symbolics.@variables R(t)[1:4] ω(t)[1:3] th(t)[1:3] speed_of_sound(t)
+    Symbolics.@variables R(t)[1:2] ω(t)[1:2] th(t)[1:3] speed_of_sound(t)
 
     Symbolics.@variables free_dynamic_pressure(t) phi(t) vel(t) iJz(t)[1:3] alpha1(t) alpha2(t)
     Symbolics.@variables aero_moment(t) aero_torque(t)[1:3] torque(t)[1:3] aero_force(t)[1:3] Cdfs(t) Clfs(t) net_torque(t)[1:3]
@@ -213,7 +221,7 @@ function make_vehicle(;
         # D(m) ~ cα <= sqrt(u)
 
         net_torque .~ cross(engine_offset, Symbolics.scalarize(u * 50)) .+ ctrl_torque .+ body_torque;
-        D.(ρω.*ω) .~ -τc.*collect(Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)) .+ ω);
+        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ ω);
         D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(ρR.*R), Symbolics.scalarize(ρω.*ω));
 
         Symbolics.scalarize(D.(ρv.*v) .~ τc.*([0, 0, -9.8] .+ (iquat(ρR .* R) * Symbolics.scalarize(u) * 50) .+ aero_force/mdry)); #  ./ m seems to add a lot of slowness
@@ -250,19 +258,19 @@ tf_max = 15.0
 tf_min = 0.25
 pos_init = [100.0,100.0,4000.0]
 vel_init = [0,0,-100.0]
-R_init = [1.0,0,0,0]
-ω_init = [0,0,0.0]
+R_init = [0,0]
+ω_init = [0,0]
 m_init = (10088 + 10088)/10088
 
 pos_final = [0,0,0.0]
 vel_final = [0,0,0.0]
-R_final = [1.0,0,0,0]
-ω_final = [0,0,0.0]
+R_final = [0.0,0]
+ω_final = [0,0.0]
 
-R_scale = [1.0,1.0,1.0,1.0] .* 0.5
-pos_scale = [4000.0,4000.0,4000.0]
+R_scale = [1.0,1.0]
+pos_scale = [1000.0,1000.0,1000.0]
 vel_scale = [100.0,100.0,100.0]
-ω_scale = [1.0,1.0,1.0] * 0.5
+ω_scale = [1.0,1.0]
 prob = ODEProblem(ssys, [
     ssys.veh.m => m_init
     ssys.veh.ω => ω_init
@@ -273,7 +281,7 @@ prob = ODEProblem(ssys, [
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale
     ssys.veh.ρpos => pos_scale
-    ssys.input_fin1.vals => -0.1*ones(20)
+    ssys.input_fin1.vals => -0.4*ones(20)
     ssys.input_fin2.vals => 0.0*ones(20) # 0.0*ones(20) #
 ])
 sol = solve(prob, Tsit5(); dtmax=0.0001)
@@ -327,7 +335,7 @@ prb = trajopt(probsys, (0.0, 1.0), 20,
     0.0, 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
     ((sum((vel_scale[1:2] .* probsys.veh.v[1:2]).^2))) + sum((pos_scale .* probsys.veh.pos) .^2) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2));
 
-    do_trajopt(prb; maxsteps=1);
+    _,_,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
     u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
 @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
 

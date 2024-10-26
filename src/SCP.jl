@@ -351,11 +351,11 @@ function do_trajopt(prb; maxsteps=300)
         if !isnothing(convex_mod)
             convex_mod(model, δx, xref, δu, uref)
         end
-        @constraint(model, δx[4:6,N] .+ xref[4:6,N] .== [0.0,0.0,0.0]) # omega
-        @constraint(model, δx[7:10,N] .+ xref[7:10,N] .== [2.0,0.0,0.0,0.0]) # R
+        @constraint(model, δx[4:5,N] .+ xref[4:5,N] .== [0.0,0.0]) # omega
+        @constraint(model, δx[6:7,N] .+ xref[6:7,N] .== [0.0,0.0]) # R
         #@constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # v
-        @constraint(model, δx[11:12,N] .+ xref[11:12,N] .== [0.0,0.0]) # v[1:2]
-        @constraint(model, δx[14:16,N] .+ xref[14:16,N] .== [0.0,0.0,0.0]) # pos
+        @constraint(model, δx[8:9,N] .+ xref[8:9,N] .== [0.0,0.0]) # v[1:2]
+        @constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # pos
         
         @variable(model, μ)
         @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))

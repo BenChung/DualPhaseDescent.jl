@@ -256,7 +256,7 @@ ssys = structural_simplify(probsys)
 
 tf_max = 15.0
 tf_min = 0.25
-pos_init = [100.0,100.0,4000.0]
+pos_init = [172.0,100.0,4000.0]
 vel_init = [0,0,-100.0]
 R_init = [0,0]
 ω_init = [0,0]
@@ -331,7 +331,7 @@ prb = trajopt(probsys, (0.0, 1.0), 20,
     probsys.veh.R => R_init ./ R_scale,
     probsys.veh.ω => ω_init ./ ω_scale
     ], 
-    100*sum([probsys.veh.ua[1], probsys.veh.ua[2]].^2), 0.0, 
+    probsys.veh.τc/10, 0.0, 
     0.0, 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
     ((sum((vel_scale[1:2] .* probsys.veh.v[1:2]).^2))) + sum((pos_scale .* probsys.veh.pos) .^2) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2));
 
@@ -387,6 +387,9 @@ lines!(ax1, sol.t, (sol[ssys.veh.ua[2]]))
 ax2=Makie.Axis(f[2,1])
 lines!(ax2, sol.t, (sol[ssys.veh.alpha1]))
 lines!(ax2, sol.t, (sol[ssys.veh.alpha2]))
+ax3=Makie.Axis(f[3,1])
+lines!(ax3, sol.t, (sol[ssys.veh.pos[1]]))
+lines!(ax3, sol.t, (sol[ssys.veh.pos[2]]))
 f
 lines!(sol.t, (sol[ssys.veh.ua_mapped[1]]))
 lines(sol.t, (sol[ssys.veh.alpha]))

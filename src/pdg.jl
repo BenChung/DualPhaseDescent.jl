@@ -152,6 +152,14 @@ function normalize_vec(vect)
     return vect/norm(vect)
 end
 
+
+function lookat_rmat(f, p, tgt) # moller and hughes
+    u=p.-f
+    v=p.-tgt
+    (I(3) - 2/dot(u,u) * u * u' - 2/dot(v,v) * v * v' + 4*(dot(u,v))/(dot(u,u)*dot(v,v))*v*u')
+end
+
+
 function make_vehicle(; 
     iJz_wet=[1/797918.19, 1/797918.19, 1/8197],
     iJz_dry=[1/444490.19, 1/444490.19, 1/3955],
@@ -177,7 +185,7 @@ function make_vehicle(;
     Symbolics.@variables aero_moment(t) aero_torque(t)[1:3] torque(t)[1:3] aero_force(t)[1:3] Cdfs(t) Clfs(t) net_torque(t)[1:3]
     Symbolics.@variables lift_dir(t)[1:3] local_wind_vec(t)[1:3] alpha(t) accel(t)[1:3]
     Symbolics.@variables fin_force(t)[1:4, 1:3] fin1_force(t)[1:3] fin2_force(t)[1:3] fin3_force(t)[1:3] fin4_force(t)[1:3] τc(t)
-    Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3]
+    Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3] vel_dir(t)[1:3]
     Symbolics.@variables ua(t)[1:2] ua_mapped(t)[1:2] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
     @parameters τc [tunable = true, dilation=true]
     
@@ -189,8 +197,8 @@ function make_vehicle(;
         mach ~ norm(ρv.*v)/speed_of_sound
         alpha ~ angle(v, rquat(ρR .* R) * [0,0,-1]);
         local_wind_vec .~ iquat(ρR .* R) * Symbolics.scalarize(v);
-        alpha1 ~ angle_in_plane(local_wind_vec, [0,0,-1], [0,1,0]);
-        alpha2 ~ angle_in_plane(local_wind_vec, [0,0,-1], [1,0,0]);
+        alpha1 ~ angle_in_plane(vel_dir, rquat(ρR .* R) * [0,0,-1], lift_dir2);
+        alpha2 ~ angle_in_plane(vel_dir, rquat(ρR .* R) * [0,0,-1], lift_dir1);
 
         Cd ~ body_drag_lookup(mach, alpha)
         Cl ~ body_lift_lookup(mach, alpha)
@@ -203,8 +211,11 @@ function make_vehicle(;
         aero_ctrl_drag ~ 
             act_lin_lookup(mach) * sum([cosd(alpha2), cosd(alpha1)] .* aero_ctrl_lift.^2) +
             act_const_lookup(mach) * sum(aero_ctrl_lift.^2)
-        Symbolics.scalarize(lift_dir1 .~ normalize_vec(cross(rquat(ρR .* R) * [0,1,0], ρv .* v)))
-        Symbolics.scalarize(lift_dir2 .~ normalize_vec(cross(ρv .* v, cross(rquat(ρR .* R) * [0,1,0], ρv .* v))))
+        Symbolics.scalarize(vel_dir .~ normalize_vec(ρv .* v))
+        Symbolics.scalarize(lift_dir1 .~ lookat_rmat([0,0,-1],[0,1,0],Symbolics.scalarize(vel_dir)) * [1,0,0])
+        Symbolics.scalarize(lift_dir2 .~ lookat_rmat([0,0,-1],[0,1,0],Symbolics.scalarize(vel_dir)) * [0,1,0])
+        #Symbolics.scalarize(lift_dir1 .~ normalize_vec(cross(rquat(ρR .* R) * [0,1,0], ρv .* v)))
+        #Symbolics.scalarize(lift_dir2 .~ normalize_vec(cross(ρv .* v, cross(rquat(ρR .* R) * [0,1,0], ρv .* v))))
         Symbolics.scalarize(aero_ctrl_force .~ 1000 * (lift_dir1 .* aero_ctrl_lift[1] .+ lift_dir2 .* aero_ctrl_lift[2] .- aero_ctrl_drag * v/norm(v)))
 
         aero_force .~ Symbolics.scalarize(
@@ -281,11 +292,13 @@ prob = ODEProblem(ssys, [
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale
     ssys.veh.ρpos => pos_scale
-    ssys.input_fin1.vals => -0.4*ones(20)
-    ssys.input_fin2.vals => 0.0*ones(20) # 0.0*ones(20) #
+    ssys.input_fin1.vals => 0.0*ones(20)
+    ssys.input_fin2.vals => 0.2*ones(20) # 0.0*ones(20) #
 ])
 sol = solve(prob, Tsit5(); dtmax=0.0001)
 @profview for i=1:1000 sol = solve(prob, Tsit5(); dtmax=0.01, save_everystep=false) end
+
+
 
 idx = 5000
 arrows(Point3.([

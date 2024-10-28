@@ -357,7 +357,7 @@ function do_trajopt(prb; maxsteps=300)
         @constraint(model, δx[6:7,N] .+ xref[6:7,N] .== [0.0,0.0]) # R
         #@constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # v
         @constraint(model, δx[8:9,N] .+ xref[8:9,N] .== [0.0,0.0]) # v[1:2]
-        @constraint(model, δx[13:13,N] .+ xref[13:13,N] .== [0.0]) # pos
+        @constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0,0.0]) # pos
         
         @variable(model, μ)
         @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
@@ -384,7 +384,7 @@ function do_trajopt(prb; maxsteps=300)
         wₘ=1000
         wₙ=50
         wₗ=0.5
-        @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + wₗ*ηₗ + L- 100*(δx[11,N] + xref[11,N]))
+        @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + wₗ*ηₗ + L)
         optimize!(model)
 
         est_cost = wₘ*value(μ) + wₙ*value(ν) + value(L) # the linearized cost estimate from the last iterate
@@ -424,6 +424,11 @@ function do_trajopt(prb; maxsteps=300)
         rv = collect(res.value)
         xref = xref_candidate
         uref = uref_candidate
+        if isinf(last_cost) && est_cost/actual_cost > 2
+                println("REJECT (init) $i $r try $(r*α)")
+                r *= α
+                continue
+        end
         if ρᵏ < ρ₁# it's gotten worse by too much (but acceptable), increase the penalty by α
             println("OK $i, CONTRACT $r to $(r*α)")
             r *= α

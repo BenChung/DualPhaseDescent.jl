@@ -242,7 +242,7 @@ function make_vehicle(;
         # D(m) ~ cα <= sqrt(u)
 
         net_torque .~ cross(engine_offset, Symbolics.scalarize(u * 50)) .+ ρᵣ * (ctrl_torque .+ body_torque);
-        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ ω);
+        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 2*ω);
         D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(ρR.*R), Symbolics.scalarize(ρω.*ω));
 
         Symbolics.scalarize(D.(ρv.*v) .~ τc.*([0, 0, -9.8] .+ (iquat(ρR .* R) * Symbolics.scalarize(u) * 50) .+ aero_force/mdry)); #  ./ m seems to add a lot of slowness
@@ -275,9 +275,9 @@ ssys = structural_simplify(probsys)
 
 tf_max = 15.0
 tf_min = 0.25
-pos_init = [0.0,6000.0,20000.0]
-vel_init = [0,-300,-300]
-R_init = [-deg2rad(45),0]
+pos_init = [0.0,6000.0,30000.0]
+vel_init = [0,-250,-575]
+R_init = [-deg2rad(atand(250,575)),0]
 ω_init = [0,0]
 m_init = (10088 + 10088)/10088
 
@@ -334,7 +334,7 @@ prb = trajopt(probsys, (0.0, 1.0), 20,
     sum((probsys.veh.pos .* pos_scale).^2) + ((sum((vel_scale[1:2] .* probsys.veh.v[1:2]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2));
 
     
-    _,_,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=10);
+    _,_,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
     u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=50);
 @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
 
@@ -389,6 +389,9 @@ lines!(ax2, sol.t, (sol[ssys.veh.alpha2]))
 ax3=Makie.Axis(f[3,1])
 lines!(ax3, sol.t, (sol[ssys.veh.pos[1]]))
 lines!(ax3, sol.t, (sol[ssys.veh.pos[2]]))
+ax4=Makie.Axis(f[4,1])
+lines!(ax4, sol.t, (sol[ssys.veh.aero_force[1]]))
+lines!(ax4, sol.t, (sol[ssys.veh.aero_force[2]]))
 f
 lines!(sol.t, (sol[ssys.veh.ua_mapped[1]]))
 lines(sol.t, (sol[ssys.veh.v[3]]))

@@ -196,7 +196,8 @@ function make_vehicle(;
     Symbolics.@variables fin_force(t)[1:4, 1:3] fin1_force(t)[1:3] fin2_force(t)[1:3] fin3_force(t)[1:3] fin4_force(t)[1:3] τc(t) ρᵣ(t)
     Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3] vel_dir(t)[1:3]
     Symbolics.@variables ua(t)[1:2] ua_mapped(t)[1:2] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
-    @parameters τc [tunable = true, dilation=true]
+    Symbolics.@variables τc(t)
+    @parameters τa [tunable = true, dilation=true] τp [tunable=true, dilation=true]
     
     eqns = expand_derivatives.([
         kerbin_rel .~ ρpos.*pos - kerbin_center
@@ -229,7 +230,7 @@ function make_vehicle(;
         Symbolics.scalarize(aero_ctrl_force .~ 1000 * (lift_dir1 .* aero_ctrl_lift[1] .+ lift_dir2 .* aero_ctrl_lift[2] .- aero_ctrl_drag * v/norm(v)))
 
         aero_force .~ Symbolics.scalarize(
-            Cl .* ρᵣ .* 1000 .* (cross(ρv .* v, cross(iquat(ρR .* R) * [0,0,-1],ρv .* v)))
+            Cl .* ρᵣ .* 1000 .* (cross(ρv .* v, cross(rquat(ρR .* R) * [0,0,-1],ρv .* v)))
             .- Cd * ρᵣ * 1000 *norm(Symbolics.scalarize(ρv .* v))*(ρv .* v)
             .+ ρᵣ *aero_ctrl_force) # Cl/Cd come out in kN 
 
@@ -237,12 +238,13 @@ function make_vehicle(;
         Symbolics.scalarize(ctrl_torque .~ cross([0,0,9.18], iquat(ρR .* R) * Symbolics.scalarize(aero_ctrl_force)))
 
         iJz .~ iJz_dry # + iJz_delta * propellant_fraction;
+        τc ~ ifelse(t >= 10/19, τp, τa)
         D(m) ~ -τc*sqrt_smooth(max(sum(u.^2), 0.0)) * 50/(ISP * 9.8 * mdry); # can we make it into an inequality?
         #D(m2) ~ -τc^2/(50/(ISP * 9.8))^2*sum(u.^2); # can we make it into an inequality?
         # D(m) ~ cα <= sqrt(u)
 
         net_torque .~ cross(engine_offset, Symbolics.scalarize(u * 50)) .+ ρᵣ * (ctrl_torque .+ body_torque);
-        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 2*ω);
+        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 8*ω);
         D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(ρR.*R), Symbolics.scalarize(ρω.*ω));
 
         Symbolics.scalarize(D.(ρv.*v) .~ τc.*([0, 0, -9.8] .+ (iquat(ρR .* R) * Symbolics.scalarize(u) * 50) .+ aero_force/mdry)); #  ./ m seems to add a lot of slowness
@@ -276,7 +278,7 @@ ssys = structural_simplify(probsys)
 tf_max = 15.0
 tf_min = 0.25
 pos_init = [0.0,6000.0,30000.0]
-vel_init = [0,-250,-575]
+vel_init = [0,-80,-575]
 R_init = [-deg2rad(atand(250,575)),0]
 ω_init = [0,0]
 m_init = (10088 + 10088)/10088
@@ -296,12 +298,13 @@ prob = ODEProblem(ssys, [
     ssys.veh.R => R_init ./ R_scale
     ssys.veh.pos => pos_init ./ pos_scale
     ssys.veh.v => vel_init ./ vel_scale
-    ssys.veh.τc => 50.0
+    ssys.veh.τa => 45.0
+    ssys.veh.τp => 45.0
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale
     ssys.veh.ρpos => pos_scale
     ssys.input_fin1.vals => 0.0*ones(20)
-    ssys.input_fin2.vals => 0.0*ones(20) # 0.0*ones(20) #
+    ssys.input_fin2.vals => -0.0*ones(20) # 0.0*ones(20) #
 ])
 sol = solve(prob, Tsit5(); dtmax=0.0001)
 @profview for i=1:1000 sol = solve(prob, Tsit5(); dtmax=0.01, save_everystep=false) end
@@ -314,7 +317,8 @@ prb = trajopt(probsys, (0.0, 1.0), 20,
         probsys.veh.ρpos => pos_scale,
         probsys.veh.ρR => R_scale,
         probsys.veh.ρω => ω_scale,
-        probsys.veh.τc => 50.0
+        probsys.veh.τa => 45.0,
+        probsys.veh.τp => 45.0
     ]), 
     Dict(
         [probsys.veh.m => collect(LinRange(m_init, m_init, 20));
@@ -329,13 +333,13 @@ prb = trajopt(probsys, (0.0, 1.0), 20,
     probsys.veh.R => R_init ./ R_scale,
     probsys.veh.ω => ω_init ./ ω_scale
     ], 
-    probsys.veh.τc/10, 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
+    (probsys.veh.τa + probsys.veh.τp)/10, 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
     probsys.veh.alpha - 25.0, 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
     sum((probsys.veh.pos .* pos_scale).^2) + ((sum((vel_scale[1:2] .* probsys.veh.v[1:2]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2));
 
     
-    _,_,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=50);
+    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=15);
+    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=20);
 @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
 
 f = Figure()
@@ -374,8 +378,9 @@ prob = ODEProblem(ssys, [
     ssys.veh.ρpos => pos_scale;
     denamespace.((ssys, ), tp) .=> [
         u[end][1], #10*u[end][1], 
-        u[end][2:21], 
-        u[end][22:end]]
+        u[end][2], 
+        u[end][3:22], 
+        u[end][23:end]]
 ])
 sol = solve(prob, Tsit5(); dtmax=0.001)
 
@@ -392,6 +397,7 @@ lines!(ax3, sol.t, (sol[ssys.veh.pos[2]]))
 ax4=Makie.Axis(f[4,1])
 lines!(ax4, sol.t, (sol[ssys.veh.aero_force[1]]))
 lines!(ax4, sol.t, (sol[ssys.veh.aero_force[2]]))
+lines!(ax4, sol.t, (sol[ssys.veh.aero_force[3]]))
 f
 lines!(sol.t, (sol[ssys.veh.ua_mapped[1]]))
 lines(sol.t, (sol[ssys.veh.v[3]]))

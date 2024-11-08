@@ -86,7 +86,7 @@ Symbolics.@register_symbolic get_sampled_data_internal(t::Float64, buffer::Vecto
 function get_sampled_data_internal(a, b, c, d)
     ModelingToolkitStandardLibrary.Blocks.get_sampled_data(a, (b), c #= convert(eltype(b), c) =#, d)
 end
-@component function first_order_hold(; name, N, dt)
+@component function first_order_hold(; name, N, dt, tmin=0.0, val_pre=0.0, val_post=0.0)
     syms = [Symbol("val$i") for i=1:N]
     #params = [first(@parameters $sym = 0.0, [tunable = true, relevant_time = ((i-1)*dt,i*dt)]) for (i, sym) in enumerate(syms)]
     @parameters vals[1:N]=zeros(N) 
@@ -94,7 +94,7 @@ end
         output = RealOutput()
     end
     eqs = [
-        output.u ~ ifelse(t < dt*N, get_sampled_data_internal(t, vals, dt, false), vals[end])
+        output.u ~ ifelse(t-tmin < 0.0, val_pre, ifelse(t-tmin < dt*N, get_sampled_data_internal(t-tmin, vals, dt, false), ifelse(t-tmin == dt*N, vals[end], val_post)))
     ]
     #pdeps = [vals ~ params]
     return ODESystem(eqs, t, [], [vals]; name, systems #=continuous_events = [t % dt ~ 0],=#)
@@ -174,7 +174,7 @@ function trajopt(
     sys, tspan, N, given_params, initial_guess,
     ic, running_cost, terminal_cost, 
     g, h, Ph,
-    convex_mod=nothing
+    convex_mod=nothing, problem_mod=nothing
 )
 @show g h Ph
 @show terminal_cost
@@ -191,6 +191,9 @@ function trajopt(
     ]
     @show running_cost
     augmented_system = ODESystem(eqs, t, systems=[sys], name=:augmented_system)
+    if !isnothing(problem_mod)
+        augmented_system = problem_mod(augmented_system, l, y)
+    end
     exsys = structural_simplify(augmented_system)
     tsys = exsys
     #=
@@ -288,7 +291,8 @@ function trajopt(
         :get_cost => get_cost,
         :N => N,
         :dil => dil, 
-        :convex_mod => convex_mod
+        :convex_mod => convex_mod,
+        :pars => params
         #:jac_sparsity => sparsity_pattern,
         #:colorvec => colorvec
         ])
@@ -305,6 +309,7 @@ function do_trajopt(prb; maxsteps=300)
     N = prb[:N]
     dil = prb[:dil]
     nunk = length(unknowns(tsys))
+    params = prb[:pars]
 
 
     tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0, y => 0.0]))
@@ -323,7 +328,13 @@ function do_trajopt(prb; maxsteps=300)
     rd = collect(res.derivs[1]) # res gets clobbered for some reason by linearize?
     rv = collect(res.value)
 
-    r = 1.0
+    if !isnothing(convex_mod)
+        convex_cstr_fun = convex_mod(tsys)
+    else 
+        convex_cstr_fun = nothing 
+    end
+
+    r = 8.0
     β = 2.0
     α = 2.0
     ρ₀ = 0.0
@@ -332,6 +343,7 @@ function do_trajopt(prb; maxsteps=300)
 
     last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
     @show tic
+    iref_params,rmk,_ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
     for i=1:maxsteps
         model = Model(Clarabel.Optimizer)
         set_optimizer_attribute(model, "verbose", false)
@@ -351,13 +363,15 @@ function do_trajopt(prb; maxsteps=300)
             @constraint(model, -1.0 <= δu[i] + uref[i])
         end
 
-        if !isnothing(convex_mod)
-            convex_mod(model, δx, xref, δu, uref)
+        if !isnothing(convex_cstr_fun)
+            symbolic_params = rmk(δu .+ uref)
+            convex_cstr_fun(model, δx, xref, symbolic_params)
         end
+
         @constraint(model, δx[4:5,N] .+ xref[4:5,N] .== [0.0,0.0]) # omega
         @constraint(model, δx[6:7,N] .+ xref[6:7,N] .== [0.0,0.0]) # R
         #@constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # v
-        @constraint(model, δx[8:9,N] .+ xref[8:9,N] .== [0.0,0.0]) # v[1:2]
+        @constraint(model, δx[8:10,N] .+ xref[8:10,N] .== [0.0,0.0,0.0]) # v[1:2]
         @constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0,0.0]) # pos
         
         @variable(model, μ)
@@ -368,6 +382,9 @@ function do_trajopt(prb; maxsteps=300)
         
         @variable(model, ηₗ)
         @constraint(model, ηₗ>=0.0)
+
+        @variable(model, ηₜ)
+        @constraint(model, [ηₜ; 1.0; δx[2,:] .+ xref[2,:]] ∈ MOI.RotatedSecondOrderCone(N + 2))
         
         for i=1:nparams
             if dil !== nothing && i < length(dil) && dil[i]
@@ -389,8 +406,9 @@ function do_trajopt(prb; maxsteps=300)
         @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
         wₘ=1000
         wₙ=50
+        wₜ=100
         wₗ=0.1
-        @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + wₗ*ηₗ + L)
+        @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + wₜ*ηₜ + wₗ*ηₗ + L)
         optimize!(model)
         @show objective_value(model)
 
@@ -399,14 +417,14 @@ function do_trajopt(prb; maxsteps=300)
         uref_candidate = uref .+ value.(δu)
         #@show uref[dil] value.(δu)[dil]
         res_candidate = linearize(xref_candidate, uref_candidate)
-        @show value(μ) value(ν) value(L) value(ηₚ) 0.5*sum(value.([reshape(δx, :); reshape(δu, :)])).^2
+        @show value(μ) value(ν) value(L) value(ηₚ) 0.5*sum(value.([reshape(δx, :); reshape(δu, :)])).^2 rv[end]
         push!(delta_lin_hist, res_candidate.derivs[1])
         #@show predicted
         actual = res_candidate.value[1:end-1]
-        @show actual[end]
+        @show res_candidate.value[end]
         lin_err = actual .- reshape(xref_candidate[:, 2:N], :)
         #@show lin_err
-        actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
+        actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + wₜ*sum(reshape(res_candidate.value[1:end-1], nunk, N-1)[2, :] .^ 2) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
         push!(costs, est_cost)
         push!(rcosts, actual_cost)
         dk = last_cost - actual_cost
@@ -429,16 +447,16 @@ function do_trajopt(prb; maxsteps=300)
             push!(whist, value.(w))
             break # done
         end
+        if isinf(last_cost) && est_cost/actual_cost > 2
+                #println("REJECT (init) $i $r try $(r*α)")
+                #r *= α
+                #continue
+        end
         res = res_candidate # accept the step
         rd = collect(res.derivs[1]) # res gets clobbered for some reason by linearize?
         rv = collect(res.value)
         xref = xref_candidate
         uref = uref_candidate
-        if isinf(last_cost) && est_cost/actual_cost > 2
-                println("REJECT (init) $i $r try $(r*α)")
-                r *= α
-                continue
-        end
         if ρᵏ < ρ₁# it's gotten worse by too much (but acceptable), increase the penalty by α
             println("OK $i, CONTRACT $r to $(r*α)")
             r *= α

@@ -79,6 +79,8 @@ act_scale_lookup = AeroLookup1DTs(act_scale)
 struct AeroLookupTs{IT}
     itp::IT
 end
+Base.nameof(::AeroLookup1DTs) = :AeroLookup1DTs
+Base.nameof(::AeroLookupTs) = :AeroLookupTs
 @register_symbolic (a::AeroLookupTs)(mach, alpha)
 (a::AeroLookupTs)(mach, alpha) = a.itp(mach, alpha)
 body_drag_lookup = AeroLookupTs(body_drag)
@@ -195,8 +197,8 @@ function make_vehicle(;
     Symbolics.@variables lift_dir(t)[1:3] local_wind_vec(t)[1:3] alpha(t) accel(t)[1:3]
     Symbolics.@variables fin_force(t)[1:4, 1:3] fin1_force(t)[1:3] fin2_force(t)[1:3] fin3_force(t)[1:3] fin4_force(t)[1:3] τc(t) ρᵣ(t)
     Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3] vel_dir(t)[1:3]
-    Symbolics.@variables ua(t)[1:2] ua_mapped(t)[1:2] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
-    Symbolics.@variables τc(t)
+    Symbolics.@variables ua(t)[1:2] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
+    Symbolics.@variables τc(t) acc(t)[1:3]
     @parameters τa [tunable = true, dilation=true] τp [tunable=true, dilation=true]
     
     eqns = expand_derivatives.([
@@ -216,8 +218,6 @@ function make_vehicle(;
         Cm ~ body_torq_lookup(mach, alpha)
 
         # todo: density/velocity correction
-        ua_mapped[1] ~ remap1(mach, alpha1, alpha2, ua[1])
-        ua_mapped[2] ~ remap2(mach, alpha1, alpha2, ua[2])
         Symbolics.scalarize(aero_ctrl_lift .~ ua .* act_scale_lookup(mach))
         aero_ctrl_drag ~ 
             act_lin_lookup(mach) * sum([cosd(alpha2), cosd(alpha1)] .* aero_ctrl_lift.^2) +
@@ -238,16 +238,18 @@ function make_vehicle(;
         Symbolics.scalarize(ctrl_torque .~ cross([0,0,9.18], iquat(ρR .* R) * Symbolics.scalarize(aero_ctrl_force)))
 
         iJz .~ iJz_dry # + iJz_delta * propellant_fraction;
-        τc ~ ifelse(t >= 10/19, τp, τa)
-        D(m) ~ -τc*sqrt_smooth(max(sum(u.^2), 0.0)) * 50/(ISP * 9.8 * mdry); # can we make it into an inequality?
+        τc ~ 10*ifelse(t >= 0.5, τp, τa)
+        D(m) ~ -τc*sqrt_smooth(max(sum(u.^2), 0.0)) * 980000/(ISP * 9.8 * mdry); # can we make it into an inequality?
         #D(m2) ~ -τc^2/(50/(ISP * 9.8))^2*sum(u.^2); # can we make it into an inequality?
         # D(m) ~ cα <= sqrt(u)
 
-        net_torque .~ cross(engine_offset, Symbolics.scalarize(u * 50)) .+ ρᵣ * (ctrl_torque .+ body_torque);
-        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 8*ω);
+        th .~ u * 980000
+        net_torque .~ cross(engine_offset, th) .+ ρᵣ * (ctrl_torque .+ body_torque); # TODO: change 50
+        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 10*ω);
         D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(ρR.*R), Symbolics.scalarize(ρω.*ω));
 
-        Symbolics.scalarize(D.(ρv.*v) .~ τc.*([0, 0, -9.8] .+ (iquat(ρR .* R) * Symbolics.scalarize(u) * 50) .+ aero_force/mdry)); #  ./ m seems to add a lot of slowness
+        acc .~ ([0, 0, -9.8] .+ (iquat(ρR .* R) * Symbolics.scalarize(th))/(m*mdry) .+ aero_force/(m*mdry))
+        Symbolics.scalarize(D.(ρv.*v) .~ τc.*acc); #  ./ m seems to add a lot of slowness
         Symbolics.scalarize(D.(ρpos.*pos) .~ τc.*(v .* ρv));
     ])
     return ODESystem(expand_derivatives.(Symbolics.scalarize.(eqns)), t; name = name)
@@ -255,20 +257,20 @@ end
 
 function build_example_problem()
     @named veh = make_vehicle()
-    @named inputx = first_order_hold(N = 20, dt=0.05)
-    @named inputy = first_order_hold(N = 20, dt=0.05)
-    @named inputz = first_order_hold(N = 20, dt=0.05)
+    @named inputx = first_order_hold(N = 20, dt=0.025, tmin=0.5)
+    @named inputy = first_order_hold(N = 20, dt=0.025, tmin=0.5)
+    @named inputz = first_order_hold(N = 20, dt=0.025, tmin=0.5)
 
-    @named input_fin1 = first_order_hold(N=20, dt=0.05)
-    @named input_fin2 = first_order_hold(N=20, dt=0.05)
+    @named input_fin1 = first_order_hold(N=20, dt=0.025)
+    @named input_fin2 = first_order_hold(N=20, dt=0.025)
         
     @named model = ODESystem([
-        veh.u[1] ~ 0, #inputx.output.u, 
-        veh.u[2] ~ 0, #inputy.output.u, 
-        veh.u[3] ~ 0, #inputz.output.u,
+        veh.u[1] ~ inputx.output.u, 
+        veh.u[2] ~ inputy.output.u, 
+        veh.u[3] ~ inputz.output.u,
         veh.ua[1] ~ input_fin1.output.u,
         veh.ua[2] ~ input_fin2.output.u], t,
-        systems = [veh, input_fin1, input_fin2])
+        systems = [veh, input_fin1, input_fin2, inputx, inputy, inputz])
     return model # structural_simplify(model)
 end
 
@@ -278,7 +280,7 @@ ssys = structural_simplify(probsys)
 tf_max = 15.0
 tf_min = 0.25
 pos_init = [0.0,6000.0,30000.0]
-vel_init = [0,-80,-575]
+vel_init = [0,-150,-575]
 R_init = [-deg2rad(atand(250,575)),0]
 ω_init = [0,0]
 m_init = (10088 + 10088)/10088
@@ -298,34 +300,37 @@ prob = ODEProblem(ssys, [
     ssys.veh.R => R_init ./ R_scale
     ssys.veh.pos => pos_init ./ pos_scale
     ssys.veh.v => vel_init ./ vel_scale
-    ssys.veh.τa => 45.0
-    ssys.veh.τp => 45.0
+    ssys.veh.τa => 75.0/10
+    ssys.veh.τp => 15.0/10
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale
     ssys.veh.ρpos => pos_scale
     ssys.input_fin1.vals => 0.0*ones(20)
     ssys.input_fin2.vals => -0.0*ones(20) # 0.0*ones(20) #
+    ssys.inputz.vals => 0.1 * ones(20)
 ])
 sol = solve(prob, Tsit5(); dtmax=0.0001)
-@profview for i=1:1000 sol = solve(prob, Tsit5(); dtmax=0.01, save_everystep=false) end
 
-mkinit(var, N) = eachrow(stack(sol(LinRange(0.0,1.0,N), idxs=var).u))
+function mkinit_interp(var, N, sol)
+    sol(LinRange(0.0,1.0,N), idxs=var).u
+end
+mkinit(var, N, sol) = eachrow(stack(mkinit_interp(var, N, sol)))
 lin_range_vals(i,f,n) = eachrow(reduce(hcat, LinRange(i, f, n)))
-prb = trajopt(probsys, (0.0, 1.0), 20, 
+prb = trajopt(probsys, (0.0, 1.0), 41, 
     Dict([
         probsys.veh.ρv => vel_scale,
         probsys.veh.ρpos => pos_scale,
         probsys.veh.ρR => R_scale,
         probsys.veh.ρω => ω_scale,
-        probsys.veh.τa => 45.0,
-        probsys.veh.τp => 45.0
+        probsys.veh.τa => 75.0/10,
+        probsys.veh.τp => 15.0/10
     ]), 
     Dict(
-        [probsys.veh.m => collect(LinRange(m_init, m_init, 20));
-        Symbolics.scalarize(probsys.veh.pos .=> mkinit(probsys.veh.pos, 20)); #lin_range_vals(pos_init ./ pos_scale, pos_final, 20));
-        Symbolics.scalarize(probsys.veh.v .=> mkinit(probsys.veh.v, 20)); # lin_range_vals(vel_init ./ vel_scale, vel_final ./ vel_scale, 20));
-        Symbolics.scalarize(probsys.veh.R .=> mkinit(probsys.veh.R, 20)); # lin_range_vals(R_init ./ R_scale, R_final ./ R_scale, 20));
-        Symbolics.scalarize(probsys.veh.ω .=> mkinit(probsys.veh.ω, 20)); # lin_range_vals(ω_init ./ ω_scale, ω_final ./ ω_scale, 20))
+        [probsys.veh.m => collect(LinRange(m_init, m_init, 41));
+        Symbolics.scalarize(probsys.veh.pos .=> mkinit(probsys.veh.pos, 41, sol)); #lin_range_vals(pos_init ./ pos_scale, pos_final, 41));
+        Symbolics.scalarize(probsys.veh.v .=> mkinit(probsys.veh.v, 41, sol)); # lin_range_vals(vel_init ./ vel_scale, vel_final ./ vel_scale, 41));
+        Symbolics.scalarize(probsys.veh.R .=> mkinit(probsys.veh.R, 41, sol)); # lin_range_vals(R_init ./ R_scale, R_final ./ R_scale, 41));
+        Symbolics.scalarize(probsys.veh.ω .=> mkinit(probsys.veh.ω, 41, sol)); # lin_range_vals(ω_init ./ ω_scale, ω_final ./ ω_scale, 41))
         ]), 
     [probsys.veh.m => m_init,
     probsys.veh.pos => pos_init ./ pos_scale,
@@ -333,14 +338,113 @@ prb = trajopt(probsys, (0.0, 1.0), 20,
     probsys.veh.R => R_init ./ R_scale,
     probsys.veh.ω => ω_init ./ ω_scale
     ], 
-    (probsys.veh.τa + probsys.veh.τp)/10, 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
-    probsys.veh.alpha - 25.0, 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
-    sum((probsys.veh.pos .* pos_scale).^2) + ((sum((vel_scale[1:2] .* probsys.veh.v[1:2]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2));
+    (probsys.veh.τa + probsys.veh.τp)/5 + sqrt_smooth(Symbolics.scalarize(sum(probsys.veh.u .^ 2))), 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
+    max(tanh(Symbolics.scalarize(norm(probsys.veh.v))) * (probsys.veh.alpha - 25.0), 0.0) +
+    #norm(probsys.veh.ρv .* probsys.veh.v) * probsys.veh.alpha + 
+    10*ifelse(t>0.5, max(0.5^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
+    sum((probsys.veh.pos .* pos_scale).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
+    (tsys) -> begin 
+        get_x = getp(tsys, tsys.model.inputx.vals)
+        get_y = getp(tsys, tsys.model.inputy.vals)
+        get_z = getp(tsys, tsys.model.inputz.vals)
+        return function (model, δx, xref, symbolic_params)
+            x_ctrl = get_x(symbolic_params)
+            y_ctrl = get_y(symbolic_params)
+            z_ctrl = get_z(symbolic_params)
+            for (x,y,z) in Iterators.zip(x_ctrl, y_ctrl, z_ctrl)
+                # 10.5 degree tvc
+                @constraint(model, [z * tand(10.5/2), x, y] in SecondOrderCone())
+                # max throttle
+                @constraint(model, [1.0, x, y, z] in SecondOrderCone())
+            end
+        end
+    end);
 
     
-    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=15);
-    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=20);
-@profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
+    @profview ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
+    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=40);
+    @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
+    ignst = x[end][:,21]
+    ignpt = ignst[11:13]
+    pushdir = [0.0, 0.0, 1.0]
+
+
+    prob_ws = ODEProblem(ssys, [
+        ssys.veh.m => m_init
+        ssys.veh.ω => ω_init
+        ssys.veh.R => R_init
+        ssys.veh.pos => pos_init ./ pos_scale
+        ssys.veh.v => vel_init ./ vel_scale
+    ], (0.0, 1.0), [
+        ssys.veh.ρv => vel_scale;
+        ssys.veh.ρpos => pos_scale;
+        denamespace.((ssys, ), tp) .=> [
+            u[end][1], #10*u[end][1], 
+            u[end][2], 
+            u[end][3:22], 
+            u[end][23:42], 
+            u[end][43:62], 
+            u[end][63:82], 
+            u[end][83:102]]
+    ])
+    sol_ws = solve(prob_ws, Tsit5(); dtmax=0.001)
+
+prb_divert = trajopt(probsys, (0.0, 1.0), 41, 
+    Dict([
+        probsys.veh.ρv => vel_scale,
+        probsys.veh.ρpos => pos_scale,
+        probsys.veh.ρR => R_scale,
+        probsys.veh.ρω => ω_scale,
+        probsys.veh.τa => 75.0/10,
+        probsys.veh.τp => 15.0/10
+    ]), 
+    Dict(
+        [probsys.veh.m .=> mkinit(probsys.veh.pos, 41, sol_ws);
+        Symbolics.scalarize(probsys.veh.pos .=> mkinit(probsys.veh.pos, 41, sol_ws)); #lin_range_vals(pos_init ./ pos_scale, pos_final, 41));
+        Symbolics.scalarize(probsys.veh.v .=> mkinit(probsys.veh.v, 41, sol_ws)); # lin_range_vals(vel_init ./ vel_scale, vel_final ./ vel_scale, 41));
+        Symbolics.scalarize(probsys.veh.R .=> mkinit(probsys.veh.R, 41, sol_ws)); # lin_range_vals(R_init ./ R_scale, R_final ./ R_scale, 41));
+        Symbolics.scalarize(probsys.veh.ω .=> mkinit(probsys.veh.ω, 41, sol_ws)); # lin_range_vals(ω_init ./ ω_scale, ω_final ./ ω_scale, 41))
+        ]), 
+    [probsys.veh.m => m_init,
+    probsys.veh.pos => pos_init ./ pos_scale,
+    probsys.veh.v => vel_init ./ vel_scale,
+    probsys.veh.R => R_init ./ R_scale,
+    probsys.veh.ω => ω_init ./ ω_scale
+    ], 
+    (probsys.veh.τa + probsys.veh.τp)/5 + sqrt_smooth(Symbolics.scalarize(sum(probsys.veh.u .^ 2))), 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
+    max(tanh(Symbolics.scalarize(norm(probsys.veh.v))) * (probsys.veh.alpha - 25.0), 0.0) +
+    #norm(probsys.veh.ρv .* probsys.veh.v) * probsys.veh.alpha + 
+    10*ifelse(t>0.5, max(0.5^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
+    sum((probsys.veh.pos .* pos_scale).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
+    (tsys) -> begin 
+        get_x = getp(tsys, tsys.model.inputx.vals)
+        get_y = getp(tsys, tsys.model.inputy.vals)
+        get_z = getp(tsys, tsys.model.inputz.vals)
+        return function (model, δx, xref, symbolic_params)
+            x_ctrl = get_x(symbolic_params)
+            y_ctrl = get_y(symbolic_params)
+            z_ctrl = get_z(symbolic_params)
+            for (x,y,z) in Iterators.zip(x_ctrl, y_ctrl, z_ctrl)
+                # 10.5 degree tvc
+                @constraint(model, [z * tand(10.5/2), x, y] in SecondOrderCone())
+                # max throttle
+                @constraint(model, [1.0, x, y, z] in SecondOrderCone())
+            end
+        end
+    end,
+    (sys, l, y) -> begin 
+        function add_divert!(i, u, p, c)
+            i[u.l] -= 10*dot([i[u.posx], i[u.posy], i[u.posz]] .- ignpt, pushdir)
+        end
+        @named augmenting=ODESystem([], t; discrete_events=[
+            [0.5] => (add_divert!, [l => :l, probsys.veh.pos[1] => :posx, probsys.veh.pos[2] => :posy, probsys.veh.pos[3] => :posz], [], [], nothing)
+        ])
+        return extend(sys, augmenting)
+    end);
+    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
+
+    
+    up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=30);
 
 f = Figure()
 ax = Makie.Axis(f[1,1])
@@ -380,27 +484,53 @@ prob = ODEProblem(ssys, [
         u[end][1], #10*u[end][1], 
         u[end][2], 
         u[end][3:22], 
-        u[end][23:end]]
+        u[end][23:42], 
+        u[end][43:62], 
+        u[end][63:82], 
+        u[end][83:102]]
+])
+prob = ODEProblem(ssys, [
+    ssys.veh.m => m_init
+    ssys.veh.ω => ω_init
+    ssys.veh.R => R_init
+    ssys.veh.pos => pos_init ./ pos_scale
+    ssys.veh.v => vel_init ./ vel_scale
+], (0.0, 1.0), [
+    ssys.veh.ρv => vel_scale;
+    ssys.veh.ρpos => pos_scale;
+    denamespace.((ssys, ), tp) .=> [
+        up[end][1], #10*up[end][1], 
+        up[end][2], 
+        up[end][3:22], 
+        up[end][23:42], 
+        up[end][43:62], 
+        up[end][63:82], 
+        up[end][83:102]]
 ])
 sol = solve(prob, Tsit5(); dtmax=0.001)
 
+retimer(t) = 10*(min(t, 0.5) * prob.ps[ssys.veh.τa] + max(t - 0.5, 0) * prob.ps[ssys.veh.τp])
+
 f=Figure()
 ax1=Makie.Axis(f[1,1])
-lines!(ax1, sol.t, (sol[ssys.veh.ua[1]]))
-lines!(ax1, sol.t, (sol[ssys.veh.ua[2]]))
+timebase = retimer.(sol.t)
+lines!(ax1, timebase, (sol[ssys.veh.ua[1]]))
+lines!(ax1, timebase, (sol[ssys.veh.ua[2]]))
 ax2=Makie.Axis(f[2,1])
-lines!(ax2, sol.t, (sol[ssys.veh.alpha1]))
-lines!(ax2, sol.t, (sol[ssys.veh.alpha2]))
+lines!(ax2, timebase, (sol[ssys.veh.alpha1]))
+lines!(ax2, timebase, (sol[ssys.veh.alpha2]))
 ax3=Makie.Axis(f[3,1])
-lines!(ax3, sol.t, (sol[ssys.veh.pos[1]]))
-lines!(ax3, sol.t, (sol[ssys.veh.pos[2]]))
+lines!(ax3, timebase, (sol[ssys.veh.pos[1]]))
+lines!(ax3, timebase, (sol[ssys.veh.pos[2]]))
 ax4=Makie.Axis(f[4,1])
-lines!(ax4, sol.t, (sol[ssys.veh.aero_force[1]]))
-lines!(ax4, sol.t, (sol[ssys.veh.aero_force[2]]))
-lines!(ax4, sol.t, (sol[ssys.veh.aero_force[3]]))
+lines!(ax4, timebase, (sol[ssys.veh.aero_force[1]]))
+lines!(ax4, timebase, (sol[ssys.veh.aero_force[2]]))
+lines!(ax4, timebase, (sol[ssys.veh.aero_force[3]]))
 f
-lines!(sol.t, (sol[ssys.veh.ua_mapped[1]]))
-lines(sol.t, (sol[ssys.veh.v[3]]))
+lines(timebase, (sol[Symbolics.scalarize(norm(ssys.veh.aero_force/(ssys.veh.m *9.8*ssys.veh.mdry)))]))
+lines(timebase, (sol[ssys.veh.u[3]]))
+lines!(timebase, (sol[ssys.veh.u[1]]))
+lines!(timebase, (sol[ssys.veh.u[2]]))
 lines(Point3.(sol[ssys.veh.pos]))
 
 

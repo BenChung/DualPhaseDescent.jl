@@ -250,7 +250,7 @@ function trajopt(
         detector = TracerSparsityDetector();
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         res = zeros(nunk * (N-1) + 1);
-        Float64.(jacobian_sparsity(lnz(adaptive=false, dt=0.001, unstable_check=(dt,u,p,t) -> false),linpoint,detector))
+        Float64.(jacobian_sparsity(lnz(adaptive=false, dt=0.0001, unstable_check=(dt,u,p,t) -> false),linpoint,detector))
     end
 
     sparsity_pattern = sparsity_linearize(collect(iguess[:, 1:N]), collect(tunable))
@@ -258,7 +258,7 @@ function trajopt(
 
     dx_ref = zeros(nunk * (N-1) + 1)
     cache = ForwardColorJacCache(
-        lnz(adaptive=false, dt=0.001),
+        lnz(adaptive=false, dt=0.0001),
         ComponentArray(u0=collect(iguess[:, 1:N]), params=collect(tunable));
         dx = dx_ref,
         colorvec = colorvec,
@@ -269,12 +269,12 @@ function trajopt(
         value = collect(linearize(linpoint))
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         res = DiffResults.JacobianResult(zeros(nunk * (N-1) + 1), linpoint);
-        ForwardDiff.jacobian!(res, lnz(adaptive=false, dt=0.001), linpoint)
+        ForwardDiff.jacobian!(res, lnz(adaptive=false, dt=0.0001), linpoint)
 =#
         
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         jac = zeros(nunk * (N-1) + 1, length(linpoint))
-        forwarddiff_color_jacobian!(jac, (J,x) -> J .= lnz(adaptive=false, dt=0.001)(x), linpoint, cache)
+        forwarddiff_color_jacobian!(jac, (J,x) -> J .= lnz(adaptive=false, dt=0.0001)(x), linpoint, cache)
         return (value=ForwardDiff.value(cache), derivs=(jac, ))
         #=
         global value_sparse = 

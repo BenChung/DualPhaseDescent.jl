@@ -174,6 +174,8 @@ function lookat_rmat(f, p, tgt) # moller and hughes
     (I(3) - 2/dot(u,u) * u * u' - 2/dot(v,v) * v * v' + 4*(dot(u,v))/(dot(u,u)*dot(v,v))*v*u')
 end
 
+ksc_lat = -6/60 + 9/3600 # 0d 6m 9s S
+angle_from_pole = 90 - ksc_lat # around east/2 axis
 
 function make_vehicle(; 
     iJz_wet=[1/797918.19, 1/797918.19, 1/8197],
@@ -192,6 +194,8 @@ function make_vehicle(;
     @parameters ISP = 300, [tunable = false] fuel_mass = fuel_mass, [tunable = false] mdry = mdry, [tunable = false]
     @parameters speed_of_sound = 340, [tunable = false] ρ₀=1.225, [tunable = false]
     @parameters ρω[1:2]=ones(3), [tunable = false] ρR[1:2]=ones(2), [tunable = false] ρv[1:3]=ones(3), [tunable = false] ρpos[1:3]=ones(3), [tunable = false]
+    @parameters ωk[1:3]=RotY(deg2rad(angle_from_pole)) * [0,0, 2π/21549.425], [tunable=false] # 2 pi radians every 21549s
+    @parameters μk=3.5316e12, [tunable=false]
 
     Symbolics.@variables pos(t)[1:3] v(t)[1:3] m(t) propellant_fraction(t)
     Symbolics.@variables R(t)[1:2] ω(t)[1:2] th(t)[1:3] speed_of_sound(t)
@@ -202,26 +206,27 @@ function make_vehicle(;
     Symbolics.@variables fin_force(t)[1:4, 1:3] fin1_force(t)[1:3] fin2_force(t)[1:3] fin3_force(t)[1:3] fin4_force(t)[1:3] τc(t) ρᵣ(t)
     Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3] vel_dir(t)[1:3]
     Symbolics.@variables ua(t)[1:2] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
-    Symbolics.@variables τc(t) acc(t)[1:3]
+    Symbolics.@variables τc(t) acc(t)[1:3] centrifugal_accel(t)[1:3] coriolis_accel(t)[1:3] g_accel(t)[1:3] earth_equiv_alt(t)
     @parameters τa [tunable = true, dilation=true] τp [tunable=true, dilation=true]
     
     eqns = expand_derivatives.([
         kerbin_rel .~ ρpos.*pos - kerbin_center
         spherical_alt ~ norm(kerbin_rel) - kerbin_radius
-        temp ~ temp_vs_alt(spherical_alt)
+        earth_equiv_alt ~ 7963.75*(spherical_alt/1000)/(6371 + 1.25*(spherical_alt/1000))*1000
+        temp ~ temp_vs_alt(earth_equiv_alt)
         speed_of_sound ~ mach_vs_temp(temp)
         mach ~ norm(ρv.*v)/speed_of_sound
         alpha ~ angle(v, rquat(ρR .* R) * [0,0,-1]);
         local_wind_vec .~ iquat(ρR .* R) * Symbolics.scalarize(v);
         alpha1 ~ angle_in_plane(vel_dir, rquat(ρR .* R) * [0,0,-1], lift_dir2);
         alpha2 ~ angle_in_plane(vel_dir, rquat(ρR .* R) * [0,0,-1], lift_dir1);
-        ρᵣ ~ ρ_kg_m³_fwd(p_Pa_fwd(spherical_alt), T₀_K)/ρ₀
+        ρᵣ ~ ρ_kg_m³_fwd(p_Pa_fwd(earth_equiv_alt), T₀_K)/ρ₀
 
         Cd ~ body_drag_lookup(mach, alpha)
         Cl ~ body_lift_lookup(mach, alpha)
         Cm ~ body_torq_lookup(mach, alpha)
 
-        # todo: density/velocity correction
+        # todo: velocity correction
         Symbolics.scalarize(aero_ctrl_lift .~ ua .* act_scale_lookup(mach))
         aero_ctrl_drag ~ 
             act_lin_lookup(mach) * sum([cosd(alpha2), cosd(alpha1)] .* aero_ctrl_lift.^2) +
@@ -239,21 +244,21 @@ function make_vehicle(;
             .+ ρᵣ *aero_ctrl_force) # Cl/Cd come out in kN 
 
         Symbolics.scalarize(body_torque .~ Cm * 1000 * cross([0,0,-1], iquat(ρR .* R) * Symbolics.scalarize(ρv .* v)) * norm(ρv .* v))
-        Symbolics.scalarize(ctrl_torque .~ cross([0,0,9.18], iquat(ρR .* R) * Symbolics.scalarize(aero_ctrl_force)))
+        Symbolics.scalarize(ctrl_torque .~ cross([0,0,9.18], iquat(ρR .* R) * Symbolics.scalarize(aero_ctrl_force))) # 9.18 = height up the rocket (in m) of the fins
 
         iJz .~ iJz_dry # + iJz_delta * propellant_fraction;
         τc ~ 10*ifelse(t >= 0.5, τp, τa)
-        D(m) ~ -τc*sqrt_smooth(max(sum(u.^2), 0.0)) * 980000/(ISP * 9.8 * mdry); # can we make it into an inequality?
-        #D(m2) ~ -τc^2/(50/(ISP * 9.8))^2*sum(u.^2); # can we make it into an inequality?
-        # D(m) ~ cα <= sqrt(u)
-
         th .~ u * 980000
+        D(m) ~ -τc*sqrt_smooth(max(sum(th.^2), 0.0))/(ISP * 9.8 * mdry); 
         net_torque .~ cross(engine_offset, th) .+ ρᵣ * (ctrl_torque .+ body_torque); # TODO: change 50
         D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 10*ω);
         D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(ρR.*R), Symbolics.scalarize(ρω.*ω));
 
-        acc .~ ([0, 0, -9.8] .+ (iquat(ρR .* R) * Symbolics.scalarize(th))/(m*mdry) .+ aero_force/(m*mdry))
-        Symbolics.scalarize(D.(ρv.*v) .~ τc.*acc); #  ./ m seems to add a lot of slowness
+        centrifugal_accel .~ cross(ωk, cross(ωk, kerbin_rel))
+        coriolis_accel .~ 2*cross(ωk, ρv.*v)
+        g_accel .~ -kerbin_rel .* μk/Symbolics.scalarize(sum(kerbin_rel.^2)^(3//2))
+        acc .~ (g_accel .+ (iquat(ρR .* R) * Symbolics.scalarize(th))/(m*mdry) .+ aero_force/(m*mdry) .- centrifugal_accel .- coriolis_accel)
+        Symbolics.scalarize(D.(ρv.*v) .~ τc.*acc);
         Symbolics.scalarize(D.(ρpos.*pos) .~ τc.*(v .* ρv));
     ])
     return ODESystem(expand_derivatives.(Symbolics.scalarize.(eqns)), t; name = name)
@@ -475,7 +480,7 @@ prob = ODEProblem(ssys, [
 sol = solve(prob, Tsit5(); dtmax=0.001)
 
 
-prob = ODEProblem(ssys, [
+prob_res = ODEProblem(ssys, [
     ssys.veh.m => m_init
     ssys.veh.ω => ω_init
     ssys.veh.R => R_init
@@ -493,7 +498,7 @@ prob = ODEProblem(ssys, [
         u[end][63:82], 
         u[end][83:102]]
 ])
-prob = ODEProblem(ssys, [
+prob_res = ODEProblem(ssys, [
     ssys.veh.m => m_init
     ssys.veh.ω => ω_init
     ssys.veh.R => R_init
@@ -511,30 +516,30 @@ prob = ODEProblem(ssys, [
         up[end][63:82], 
         up[end][83:102]]
 ])
-sol = solve(prob, Tsit5(); adaptive=false, dt=0.001)
+sol_res = solve(prob_res, Tsit5())
 
 retimer(t) = 10*(min(t, 0.5) * prob.ps[ssys.veh.τa] + max(t - 0.5, 0) * prob.ps[ssys.veh.τp])
 
 f=Figure()
 ax1=Makie.Axis(f[1,1])
-timebase = retimer.(sol.t)
-lines!(ax1, timebase, (sol[ssys.veh.ua[1]]))
-lines!(ax1, timebase, (sol[ssys.veh.ua[2]]))
+timebase = retimer.(sol_res.t)
+lines!(ax1, timebase, (sol_res[ssys.veh.ua[1]]))
+lines!(ax1, timebase, (sol_res[ssys.veh.ua[2]]))
 ax2=Makie.Axis(f[2,1])
-lines!(ax2, timebase, (sol[ssys.veh.alpha1]))
-lines!(ax2, timebase, (sol[ssys.veh.alpha2]))
+lines!(ax2, timebase, (sol_res[ssys.veh.alpha1]))
+lines!(ax2, timebase, (sol_res[ssys.veh.alpha2]))
 ax3=Makie.Axis(f[3,1])
-lines!(ax3, timebase, (sol[ssys.veh.pos[1]]))
-lines!(ax3, timebase, (sol[ssys.veh.pos[2]]))
+lines!(ax3, timebase, (sol_res[ssys.veh.pos[1]]))
+lines!(ax3, timebase, (sol_res[ssys.veh.pos[2]]))
 ax4=Makie.Axis(f[4,1])
-lines!(ax4, timebase, (sol[ssys.veh.aero_force[1]]))
-lines!(ax4, timebase, (sol[ssys.veh.aero_force[2]]))
-lines!(ax4, timebase, (sol[ssys.veh.aero_force[3]]))
+lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[1]]))
+lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[2]]))
+lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[3]]))
 f
 lines(timebase, (sol[Symbolics.scalarize(norm(ssys.veh.aero_force/(ssys.veh.m *9.8*ssys.veh.m*ssys.veh.mdry)))]))
-lines(timebase, (sol[ssys.veh.u[3]]))
-lines!(timebase, (sol[ssys.veh.u[1]]))
-lines!(timebase, (sol[ssys.veh.u[2]]))
+lines(timebase, (sol_res[ssys.veh.v[3]]))
+lines!(timebase, (sol_res[ssys.veh.v[1]]))
+lines!(timebase, (sol_res[ssys.veh.v[2]]))
 lines(Point3.(sol[ssys.veh.pos]))
 
 

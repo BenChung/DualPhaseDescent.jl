@@ -253,18 +253,35 @@ function trajopt(
         Float64.(jacobian_sparsity(lnz(adaptive=false, dt=0.001, unstable_check=(dt,u,p,t) -> false),linpoint,detector))
     end
 
-    #sparsity_pattern = sparsity_linearize(collect(iguess[:, 1:N]), collect(tunable))
-    #colorvec = matrix_colors(sparsity_pattern)
+    sparsity_pattern = sparsity_linearize(collect(iguess[:, 1:N]), collect(tunable))
+    colorvec = matrix_colors(sparsity_pattern)
 
+    dx_ref = zeros(nunk * (N-1) + 1)
+    cache = ForwardColorJacCache(
+        lnz(adaptive=false, dt=0.001),
+        ComponentArray(u0=collect(iguess[:, 1:N]), params=collect(tunable));
+        dx = dx_ref,
+        colorvec = colorvec,
+        sparsity = sparsity_pattern)
     function linearize(states, pars)
 #=
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         value = collect(linearize(linpoint))
-=#
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         res = DiffResults.JacobianResult(zeros(nunk * (N-1) + 1), linpoint);
-        ForwardDiff.jacobian!(res, linearize, linpoint)
+        ForwardDiff.jacobian!(res, lnz(adaptive=false, dt=0.001), linpoint)
+=#
+        
+        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
+        jac = zeros(nunk * (N-1) + 1, length(linpoint))
+        forwarddiff_color_jacobian!(jac, (J,x) -> J .= lnz(adaptive=false, dt=0.001)(x), linpoint, cache)
+        return (value=ForwardDiff.value(cache), derivs=(jac, ))
         #=
+        global value_sparse = 
+        global value_sparse_tryme = collect(dx_ref)
+        global value_dense = res.value
+        global result_sparse = jac
+        global result_dense = res.derivs[1]
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         value2 = collect(linearize(linpoint))
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
@@ -276,7 +293,6 @@ function trajopt(
         global value_sparse = value
         global value_sparse2 = value2
         =#
-        return res
         
         #return (value=value, derivs=(jac, ))
     end
@@ -292,9 +308,9 @@ function trajopt(
         :N => N,
         :dil => dil, 
         :convex_mod => convex_mod,
-        :pars => params
-        #:jac_sparsity => sparsity_pattern,
-        #:colorvec => colorvec
+        :pars => params,
+        :jac_sparsity => sparsity_pattern,
+        :colorvec => colorvec
         ])
 end
 function do_trajopt(prb; maxsteps=300)

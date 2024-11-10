@@ -120,12 +120,16 @@ SparseConnectivityTracer.is_der2_zero_global(::typeof(T_K_fwd)) = false
 eval(SparseConnectivityTracer.generate_code_1_to_1(:Main, T_K_fwd))
 
 
+@register_symbolic p_Pa_fwd(Hp_m::Num)
 function p_Pa_fwd(Hp_m, ΔT_K = 0.0)
     ifelse(Hp_m ≤ Hp_trop_m,
         p₀_Pa*((T_K_fwd(Hp_m, ΔT_K) - ΔT_K) / T₀_K) ^ (-g₀_m_s²/(βT∇_K_m*R_M²_Ks²)),
         let p_trop = p₀_Pa*((T_K_fwd(Hp_trop_m, ΔT_K) - ΔT_K) / T₀_K) ^ (-g₀_m_s²/(βT∇_K_m*R_M²_Ks²));
         p_trop * exp(-g₀_m_s² / (R_M²_Ks²*T_K(Hp_trop_m)) * (Hp_m - Hp_trop_m)) end)
 end
+SparseConnectivityTracer.is_der1_zero_global(::typeof(p_Pa_fwd)) = false
+SparseConnectivityTracer.is_der2_zero_global(::typeof(p_Pa_fwd)) = false
+eval(SparseConnectivityTracer.generate_code_1_to_1(:Main, p_Pa_fwd))
 function ρ_kg_m³_fwd(p_Pa, T_K)
     return p_Pa / (R_M²_Ks² * T_K)
 end
@@ -366,7 +370,7 @@ prb = trajopt(probsys, (0.0, 1.0), 41,
     @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
     ignst = x[end][:,21]
     ignpt = ignst[11:13]
-    pushdir = [0.0, 0.0, 1.0]
+    pushdir = [1.0, 0.0, 0.0]
 
 
     prob_ws = ODEProblem(ssys, [
@@ -399,11 +403,11 @@ prb_divert = trajopt(probsys, (0.0, 1.0), 41,
         probsys.veh.τp => 15.0/10
     ]), 
     Dict(
-        [probsys.veh.m .=> mkinit(probsys.veh.pos, 41, sol_ws);
-        Symbolics.scalarize(probsys.veh.pos .=> mkinit(probsys.veh.pos, 41, sol_ws)); #lin_range_vals(pos_init ./ pos_scale, pos_final, 41));
-        Symbolics.scalarize(probsys.veh.v .=> mkinit(probsys.veh.v, 41, sol_ws)); # lin_range_vals(vel_init ./ vel_scale, vel_final ./ vel_scale, 41));
-        Symbolics.scalarize(probsys.veh.R .=> mkinit(probsys.veh.R, 41, sol_ws)); # lin_range_vals(R_init ./ R_scale, R_final ./ R_scale, 41));
-        Symbolics.scalarize(probsys.veh.ω .=> mkinit(probsys.veh.ω, 41, sol_ws)); # lin_range_vals(ω_init ./ ω_scale, ω_final ./ ω_scale, 41))
+        [probsys.veh.m => collect(LinRange(m_init, m_init, 41));
+        Symbolics.scalarize(probsys.veh.pos .=> mkinit(probsys.veh.pos, 41, sol)); #lin_range_vals(pos_init ./ pos_scale, pos_final, 41));
+        Symbolics.scalarize(probsys.veh.v .=> mkinit(probsys.veh.v, 41, sol)); # lin_range_vals(vel_init ./ vel_scale, vel_final ./ vel_scale, 41));
+        Symbolics.scalarize(probsys.veh.R .=> mkinit(probsys.veh.R, 41, sol)); # lin_range_vals(R_init ./ R_scale, R_final ./ R_scale, 41));
+        Symbolics.scalarize(probsys.veh.ω .=> mkinit(probsys.veh.ω, 41, sol)); # lin_range_vals(ω_init ./ ω_scale, ω_final ./ ω_scale, 41))
         ]), 
     [probsys.veh.m => m_init,
     probsys.veh.pos => pos_init ./ pos_scale,
@@ -441,10 +445,10 @@ prb_divert = trajopt(probsys, (0.0, 1.0), 41,
         ])
         return extend(sys, augmenting)
     end);
-    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
+    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=2);
 
     
-    up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=30);
+    up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50);
 
 f = Figure()
 ax = Makie.Axis(f[1,1])
@@ -507,7 +511,7 @@ prob = ODEProblem(ssys, [
         up[end][63:82], 
         up[end][83:102]]
 ])
-sol = solve(prob, Tsit5(); dtmax=0.001)
+sol = solve(prob, Tsit5(); adaptive=false, dt=0.001)
 
 retimer(t) = 10*(min(t, 0.5) * prob.ps[ssys.veh.τa] + max(t - 0.5, 0) * prob.ps[ssys.veh.τp])
 
@@ -527,7 +531,7 @@ lines!(ax4, timebase, (sol[ssys.veh.aero_force[1]]))
 lines!(ax4, timebase, (sol[ssys.veh.aero_force[2]]))
 lines!(ax4, timebase, (sol[ssys.veh.aero_force[3]]))
 f
-lines(timebase, (sol[Symbolics.scalarize(norm(ssys.veh.aero_force/(ssys.veh.m *9.8*ssys.veh.mdry)))]))
+lines(timebase, (sol[Symbolics.scalarize(norm(ssys.veh.aero_force/(ssys.veh.m *9.8*ssys.veh.m*ssys.veh.mdry)))]))
 lines(timebase, (sol[ssys.veh.u[3]]))
 lines!(timebase, (sol[ssys.veh.u[1]]))
 lines!(timebase, (sol[ssys.veh.u[2]]))

@@ -257,8 +257,9 @@ function trajopt(
     colorvec = matrix_colors(sparsity_pattern)
 
     dx_ref = zeros(nunk * (N-1) + 1)
+    jacfun = (J,x) -> J .= lnz(adaptive=true, dtmax=0.001)(x)
     cache = ForwardColorJacCache(
-        lnz(adaptive=false, dt=0.0001),
+        jacfun,
         ComponentArray(u0=collect(iguess[:, 1:N]), params=collect(tunable));
         dx = dx_ref,
         colorvec = colorvec,
@@ -274,7 +275,7 @@ function trajopt(
         
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         jac = zeros(nunk * (N-1) + 1, length(linpoint))
-        forwarddiff_color_jacobian!(jac, (J,x) -> J .= lnz(adaptive=false, dt=0.0001)(x), linpoint, cache)
+        forwarddiff_color_jacobian!(jac, jacfun, linpoint, cache)
         return (value=ForwardDiff.value(cache), derivs=(jac, ))
         #=
         global value_sparse = 
@@ -356,6 +357,11 @@ function do_trajopt(prb; maxsteps=300)
     ρ₀ = 0.0
     ρ₁ = 0.25
     ρ₂ = 0.7
+    wₘ=1000
+    wₙ=50
+    wₜ=100
+    wₗ=0.1
+    
 
     last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
     @show tic
@@ -379,9 +385,16 @@ function do_trajopt(prb; maxsteps=300)
             @constraint(model, -1.0 <= δu[i] + uref[i])
         end
 
+        @variable(model, μ)
+        @variable(model, ηₚ)
+        @variable(model, ηₗ)
+        @variable(model, ηₜ)
+        @variable(model, ν >= 0)
+        @variable(model, L)
+        objective_expr = wₘ*μ + r*ηₚ +wₙ*ν + wₜ*ηₜ + wₗ*ηₗ + L
         if !isnothing(convex_cstr_fun)
             symbolic_params = rmk(δu .+ uref)
-            convex_cstr_fun(model, δx, xref, symbolic_params)
+            objective_expr = convex_cstr_fun(model, δx, xref, symbolic_params, objective_expr)
         end
 
         @constraint(model, δx[4:5,N] .+ xref[4:5,N] .== [0.0,0.0]) # omega
@@ -390,16 +403,12 @@ function do_trajopt(prb; maxsteps=300)
         @constraint(model, δx[8:10,N] .+ xref[8:10,N] .== [0.0,0.0,0.0]) # v[1:2]
         @constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0,0.0]) # pos
         
-        @variable(model, μ)
         @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
         
-        @variable(model, ηₚ)
         @constraint(model, [ηₚ; 1.0; reshape(δx, :); reshape(δu, :)] ∈ MOI.RotatedSecondOrderCone(length(reshape(δx, :)) + length(reshape(δu, :)) + 2))
         
-        @variable(model, ηₗ)
         @constraint(model, ηₗ>=0.0)
 
-        @variable(model, ηₜ)
         @constraint(model, [ηₜ; 1.0; δx[2,:] .+ xref[2,:]] ∈ MOI.RotatedSecondOrderCone(N + 2))
         
         for i=1:nparams
@@ -415,16 +424,10 @@ function do_trajopt(prb; maxsteps=300)
         @variable(model, ηₙ) # terminal constraint trust region
         @constraint(model, [ηₙ; 1.0; tc_lin - res.value[end]] ∈ MOI.RotatedSecondOrderCone(3))
 =#
-        @variable(model, ν >= 0)
         @constraint(model, [ν; tc_lin] ∈ MOI.NormOneCone(2))
 
-        @variable(model, L)
         @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
-        wₘ=1000
-        wₙ=50
-        wₜ=100
-        wₗ=0.1
-        @objective(model, Min, wₘ*μ + r*ηₚ +wₙ*ν + wₜ*ηₜ + wₗ*ηₗ + L)
+        @objective(model, Min, objective_expr)
         optimize!(model)
         @show objective_value(model)
 

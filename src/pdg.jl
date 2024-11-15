@@ -50,18 +50,37 @@ upper_lim1_lut = make_lim_lut(:upper_lim1)
 lower_lim1_lut = make_lim_lut(:lower_lim1)
 upper_lim2_lut = make_lim_lut(:upper_lim2)
 lower_lim2_lut = make_lim_lut(:lower_lim2)
-@register_symbolic remap1(mach, alpha1, alpha2, u)
-function remap1(mach, alpha1, alpha2, u)
-    upper_lim1 = upper_lim1_lut(mach, alpha1, alpha2)
-    lower_lim1 = lower_lim1_lut(mach, alpha1, alpha2)
-    return (u + 1)/2 * upper_lim1 - (1 - (u + 1)/2) * lower_lim1
+@register_symbolic lim_err1(u, mach, alpha1, alpha2)
+
+struct LimLookupLut{T,TF}
+    mach::T
+    func::TF
 end
-@register_symbolic remap2(mach, alpha1, alpha2, u)
-function remap2(mach, alpha1, alpha2, u)
-    upper_lim2 = upper_lim2_lut(mach, alpha1, alpha2)
-    lower_lim2 = lower_lim2_lut(mach, alpha1, alpha2)
-    return (u + 1)/2 * upper_lim2 - (1 - (u + 1)/2) * lower_lim2
+function (ll::LimLookupLut)(alpha1, alpha2)
+    mach = ll.mach
+    return ll.func(mach, alpha1, alpha2)
 end
+function lim_err1(u, mach, alpha1, alpha2)
+    upper_lim1 = LimLookupLut(mach, upper_lim1_lut)(alpha1, alpha2)
+    lower_lim1 = LimLookupLut(mach, lower_lim1_lut)(alpha1, alpha2)
+    return max(-(lower_lim1 + u), 0) + max(u - upper_lim1, 0)
+end
+SparseConnectivityTracer.is_der1_arg1_zero_global(::LimLookupLut) = false
+SparseConnectivityTracer.is_der2_arg1_zero_global(::LimLookupLut) = false
+SparseConnectivityTracer.is_der1_arg2_zero_global(::LimLookupLut) = false
+SparseConnectivityTracer.is_der2_arg2_zero_global(::LimLookupLut) = false
+SparseConnectivityTracer.is_der_cross_zero_global(::LimLookupLut) = false
+
+
+
+@register_symbolic lim_err2(u, mach, alpha1, alpha2)
+function lim_err2(u, mach, alpha1, alpha2)
+    upper_lim2 = LimLookupLut(mach, upper_lim2_lut)(alpha1, alpha2)
+    lower_lim2 = LimLookupLut(mach, lower_lim2_lut)(alpha1, alpha2)
+    return max(-(lower_lim2 + u), 0) + max(u - upper_lim2, 0)
+end
+
+
 
 #drag1 = (act_lin * cos(alpha2) + act_const) * (act_scale * control)^2
 struct AeroLookup1DTs{IT}
@@ -288,8 +307,8 @@ ssys = structural_simplify(probsys)
 
 tf_max = 15.0
 tf_min = 0.25
-pos_init = [0.0,6000.0,30000.0]
-vel_init = [0,-150,-575]
+pos_init = [0.0,10000.0,50000.0]
+vel_init = [0,-200,-650]
 R_init = [-deg2rad(atand(250,575)),0]
 ω_init = [0,0]
 m_init = (10088 + 10088)/10088
@@ -309,8 +328,8 @@ prob = ODEProblem(ssys, [
     ssys.veh.R => R_init ./ R_scale
     ssys.veh.pos => pos_init ./ pos_scale
     ssys.veh.v => vel_init ./ vel_scale
-    ssys.veh.τa => 75.0/10
-    ssys.veh.τp => 15.0/10
+    ssys.veh.τa => 120.0/10
+    ssys.veh.τp => 20.0/10
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale
     ssys.veh.ρpos => pos_scale
@@ -350,13 +369,15 @@ prb = trajopt(probsys, (0.0, 1.0), 41,
     (probsys.veh.τa + probsys.veh.τp)/5 + sqrt_smooth(Symbolics.scalarize(sum(probsys.veh.u .^ 2))), 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
     max(tanh(Symbolics.scalarize(norm(probsys.veh.v))) * (probsys.veh.alpha - 25.0), 0.0) +
     #norm(probsys.veh.ρv .* probsys.veh.v) * probsys.veh.alpha + 
-    10*ifelse(t>0.5, max(0.5^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
-    sum((probsys.veh.pos .* pos_scale).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
+    10*ifelse(t>0.5, max(0.5^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0) + 
+    10*lim_err1(probsys.veh.ua[1], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2) + 
+    10*lim_err2(probsys.veh.ua[2], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
+    sum((probsys.veh.pos .* pos_scale/100).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
     (tsys) -> begin 
         get_x = getp(tsys, tsys.model.inputx.vals)
         get_y = getp(tsys, tsys.model.inputy.vals)
         get_z = getp(tsys, tsys.model.inputz.vals)
-        return function (model, δx, xref, symbolic_params)
+        return function (model, δx, xref, symbolic_params, objexp)
             x_ctrl = get_x(symbolic_params)
             y_ctrl = get_y(symbolic_params)
             z_ctrl = get_z(symbolic_params)
@@ -366,12 +387,13 @@ prb = trajopt(probsys, (0.0, 1.0), 41,
                 # max throttle
                 @constraint(model, [1.0, x, y, z] in SecondOrderCone())
             end
+            return objexp
         end
     end);
 
     
     @profview ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=40);
+    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=20);
     @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
     ignst = x[end][:,21]
     ignpt = ignst[11:13]
@@ -424,37 +446,68 @@ prb_divert = trajopt(probsys, (0.0, 1.0), 41,
     max(tanh(Symbolics.scalarize(norm(probsys.veh.v))) * (probsys.veh.alpha - 25.0), 0.0) +
     #norm(probsys.veh.ρv .* probsys.veh.v) * probsys.veh.alpha + 
     10*ifelse(t>0.5, max(0.5^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
-    sum((probsys.veh.pos .* pos_scale).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
+    sum((probsys.veh.pos .* pos_scale/100).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
     (tsys) -> begin 
         get_x = getp(tsys, tsys.model.inputx.vals)
         get_y = getp(tsys, tsys.model.inputy.vals)
         get_z = getp(tsys, tsys.model.inputz.vals)
-        return function (model, δx, xref, symbolic_params)
+
+        get_pos = getu(tsys, tsys.model.veh.pos)
+        get_push_dir = getp(tsys, tsys.push_dir)
+        get_ignpt = getp(tsys, tsys.ignpt)
+        return function (model, δx, xref, symbolic_params, objexp)
             x_ctrl = get_x(symbolic_params)
             y_ctrl = get_y(symbolic_params)
             z_ctrl = get_z(symbolic_params)
+
+            # only the tunables in symbolic params are actually symbolic; the rest are just numbers
+            push_dir = get_push_dir(symbolic_params)
+            ignpt = get_ignpt(symbolic_params)
+
+            JuMP.@variable(model, c)
+            @constraint(model, get_pos(δx[:, 21] .+ xref[:, 21]) .== ignpt .+ c .*push_dir)
             for (x,y,z) in Iterators.zip(x_ctrl, y_ctrl, z_ctrl)
                 # 10.5 degree tvc
                 @constraint(model, [z * tand(10.5/2), x, y] in SecondOrderCone())
                 # max throttle
                 @constraint(model, [1.0, x, y, z] in SecondOrderCone())
             end
+            return objexp - 10*c
         end
     end,
     (sys, l, y) -> begin 
+        @parameters push_dir[1:3]=[1,0,0], [tunable=false,input=true]
+        @parameters ignpt[1:3]=[0,0,0], [tunable=false,input=true]
         function add_divert!(i, u, p, c)
-            i[u.l] -= 10*dot([i[u.posx], i[u.posy], i[u.posz]] .- ignpt, pushdir)
+            i[u.l] -= 10*dot([i.u[u.posx], i.u[u.posy], i.u[u.posz]] .- i.ps[p.ignpt], i.ps[p.push_dir])
         end
-        @named augmenting=ODESystem([], t; discrete_events=[
-            [0.5] => (add_divert!, [l => :l, probsys.veh.pos[1] => :posx, probsys.veh.pos[2] => :posy, probsys.veh.pos[3] => :posz], [], [], nothing)
+        @named augmenting=ODESystem(Equation[], t, [], [push_dir,ignpt]; discrete_events=[
+            [0.5] => (add_divert!, [l => :l, probsys.veh.pos[1] => :posx, probsys.veh.pos[2] => :posy, probsys.veh.pos[3] => :posz], [push_dir,ignpt], [], nothing)
         ])
         return extend(sys, augmenting)
     end);
-    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=2);
+    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
 
-    
+    upd_push_dir = setp(prb_divert[:tsys], prb_divert[:tsys].push_dir)
+    upd_ignpt = setp(prb_divert[:tsys], prb_divert[:tsys].ignpt)
+
+    dir_rand = rand(3)
+    dir_rand = dir_rand/norm(dir_rand)
+    upd_push_dir(prb_divert[:pars], [0,0,1])
+    upd_ignpt(prb_divert[:pars], ignpt)
     up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50);
 
+    pushed = []
+
+    for i=1:10
+        dir_rand = rand(3)
+        dir_rand = dir_rand/norm(dir_rand)
+        upd_push_dir(prb_divert[:pars], dir_rand)
+        up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=25);
+        push!(pushed, xp[end][11:13,21])
+    end
+
+    
 f = Figure()
 ax = Makie.Axis(f[1,1])
 for i in eachindex(x[1:5:end])
@@ -537,10 +590,13 @@ lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[2]]))
 lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[3]]))
 f
 lines(timebase, (sol[Symbolics.scalarize(norm(ssys.veh.aero_force/(ssys.veh.m *9.8*ssys.veh.m*ssys.veh.mdry)))]))
-lines(timebase, (sol_res[ssys.veh.v[3]]))
-lines!(timebase, (sol_res[ssys.veh.v[1]]))
-lines!(timebase, (sol_res[ssys.veh.v[2]]))
+lines(timebase, (sol_res[ssys.veh.u[3]]))
+lines!(timebase, (sol_res[ssys.veh.u[1]]))
+lines!(timebase, (sol_res[ssys.veh.u[2]]))
+lines(timebase, (sol_res[Symbolics.scalarize(norm(ssys.veh.u))]))
+
 lines(Point3.(sol[ssys.veh.pos]))
+scatter!(Point3.(pushed))
 
 
 pos_init_2 = [0, 40000, 30000]

@@ -372,7 +372,7 @@ prb = trajopt(probsys, (0.0, 1.0), 41,
     10*ifelse(t>0.5, max(0.5^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0) + 
     10*lim_err1(probsys.veh.ua[1], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2) + 
     10*lim_err2(probsys.veh.ua[2], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
-    sum((probsys.veh.pos .* pos_scale/100).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
+    sum((probsys.veh.pos .* pos_scale).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
     (tsys) -> begin 
         get_x = getp(tsys, tsys.model.inputx.vals)
         get_y = getp(tsys, tsys.model.inputy.vals)
@@ -391,7 +391,7 @@ prb = trajopt(probsys, (0.0, 1.0), 41,
         end
     end);
 
-    
+    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
     @profview ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
     u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=20);
     @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
@@ -588,6 +588,19 @@ ax4=Makie.Axis(f[4,1])
 lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[1]]))
 lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[2]]))
 lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[3]]))
+ax5=Makie.Axis(f[5,1])
+lines!(ax5, timebase, (sol_res[ssys.veh.ρᵣ]))
+ax6=Makie.Axis(f[6,1])
+lines!(ax6, timebase, (sol_res[ssys.veh.aero_ctrl_force[1]]))
+lines!(ax6, timebase, (sol_res[ssys.veh.aero_ctrl_force[2]]))
+lines!(ax6, timebase, (sol_res[ssys.veh.aero_ctrl_force[3]]))
+ax7=Makie.Axis(f[7,1])
+lines!(ax7, timebase, (sol_res[ssys.veh.Cl]))
+lines!(ax7, timebase, (sol_res[ssys.veh.Cd]))
+ax8=Makie.Axis(f[8,1])
+lines!(ax8, timebase, (sol_res[ssys.veh.v[1]]))
+lines!(ax8, timebase, (sol_res[ssys.veh.v[2]]))
+lines!(ax8, timebase, (sol_res[ssys.veh.v[3]]))
 f
 lines(timebase, (sol[Symbolics.scalarize(norm(ssys.veh.aero_force/(ssys.veh.m *9.8*ssys.veh.m*ssys.veh.mdry)))]))
 lines(timebase, (sol_res[ssys.veh.u[3]]))

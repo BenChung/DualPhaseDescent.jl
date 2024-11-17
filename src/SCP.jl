@@ -210,6 +210,7 @@ function trajopt(
     terminal_cstr_fun = @RuntimeGeneratedFunction(generate_custom_function(tsys, Ph))
 
     get_cost = getu(tsys, tsys.l)
+    get_cstr = getu(tsys, tsys.y)
     upd_cost = setu(tsys, tsys.l)
 
     iguess = ModelingToolkit.varmap_to_vars(initial_guess, unknowns(tsys); defaults=Dict(unknowns(tsys) .=> (zeros(N), )), promotetoconcrete=false)
@@ -238,7 +239,7 @@ function trajopt(
             sim = solve(ensemble, Tsit5(), trajectories=N-1;save_everystep=false, opts...)
             final_state = collect(last(sim)[end]) 
             upd_cost(final_state, get_cost(final_state) + terminal_cost_fun(inp.u0[:,N], params_, last(sim).t))
-            terminal_cstr_value = terminal_cstr_fun(inp.u0[:,N], params, last(sim).t)
+            terminal_cstr_value = terminal_cstr_fun(inp.u0[:,N], params, last(sim).t) + get_cstr(inp.u0[:,N])
             #@show terminal_cstr_value
             return [reduce(vcat, map(s->s.u[end], sim[1:end-1])); final_state; terminal_cstr_value]
         end
@@ -314,7 +315,7 @@ function trajopt(
         :colorvec => colorvec
         ])
 end
-function do_trajopt(prb; maxsteps=300)
+function do_trajopt(prb; maxsteps=300, sλ=0.05, sX = 0.05, sU = 0.05, ϵ=1e-8, Wmin=1e-2)
     ic = prb[:ic]
     tsys = prb[:tsys]
     l, y = prb[:avars]
@@ -330,8 +331,8 @@ function do_trajopt(prb; maxsteps=300)
 
 
     tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0, y => 0.0]))
-    xref = iguess
-    uref = tunable
+    xref = collect(iguess)
+    uref = collect(tunable)
     uhist = []
     xhist = []
     whist = []
@@ -351,146 +352,58 @@ function do_trajopt(prb; maxsteps=300)
         convex_cstr_fun = nothing 
     end
 
-    r = 8.0
-    β = 2.0
-    α = 2.0
-    ρ₀ = 0.0
-    ρ₁ = 0.25
-    ρ₂ = 0.7
-    wₘ=1000
-    wₙ=50
-    wₜ=100
-    wₗ=0.1
-    
-
-    last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
-    @show tic
     iref_params,rmk,_ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
+
+    W = ones(nunk * (N-1) + 1)
+    λ = zeros(nunk * (N-1) + 1)
     for i=1:maxsteps
         model = Model(Clarabel.Optimizer)
         set_optimizer_attribute(model, "verbose", false)
         @variable(model, δx[1:nunk,1:N])
         @variable(model, w[1:nunk,1:N-1])
+        @variable(model, wlin)
+        wv = [reshape(w,:); wlin]
         @variable(model, δu[1:nparams])
         @variable(model, tc_lin)
-        @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .== rd * [reshape(δx[:, 1:N], :); δu] .+ rv .- [reshape(xref[:, 2:N], :); 0])
+        @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin + wlin] .== rd * [reshape(δx[:, 1:N], :); δu] .+ rv .- [reshape(xref[:, 2:N], :); 0])
         @constraint(model, reshape(δx[:, 1], :) .== tic .- reshape(xref[:, 1], :))
-        #@constraint(model, reshape(δx[3:6, end], :) .== [0.0, 0.0, 1.0, 1.0] .- reshape(xref[3:6, end], :))
-        # TODO
-        for i=1:nparams
-            if dil !== nothing && i < length(dil) && dil[i]
-                continue 
-            end
-            @constraint(model, δu[i] + uref[i] <= 1.0)
-            @constraint(model, -1.0 <= δu[i] + uref[i])
-        end
-
-        @variable(model, μ)
-        @variable(model, ηₚ)
-        @variable(model, ηₗ)
-        @variable(model, ηₜ)
-        @variable(model, ν >= 0)
+    
         @variable(model, L)
-        objective_expr = wₘ*μ + r*ηₚ +wₙ*ν + wₜ*ηₜ + wₗ*ηₗ + L
+
+        objective_expr = L + 
+            sum(wv .* W .* wv) + 
+            sum(λ .* wv) +
+            sum(reshape(δx, :) .* 1/(2*sX) .* reshape(δx, :)) + 
+            sum(reshape(δu, :) .* 1/(2*sU) .* reshape(δu, :))
         if !isnothing(convex_cstr_fun)
             symbolic_params = rmk(δu .+ uref)
             objective_expr = convex_cstr_fun(model, δx, xref, symbolic_params, objective_expr)
         end
-
-        @constraint(model, δx[4:5,N] .+ xref[4:5,N] .== [0.0,0.0]) # omega
-        @constraint(model, δx[6:7,N] .+ xref[6:7,N] .== [0.0,0.0]) # R
-        #@constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # v
-        @constraint(model, δx[8:10,N] .+ xref[8:10,N] .== [0.0,0.0,0.0]) # v[1:2]
-        @constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0,0.0]) # pos
         
-        @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
-        
-        @constraint(model, [ηₚ; 1.0; reshape(δx, :); reshape(δu, :)] ∈ MOI.RotatedSecondOrderCone(length(reshape(δx, :)) + length(reshape(δu, :)) + 2))
-        
-        @constraint(model, ηₗ>=0.0)
-
-        @constraint(model, [ηₜ; 1.0; δx[2,:] .+ xref[2,:]] ∈ MOI.RotatedSecondOrderCone(N + 2))
-        
-        for i=1:nparams
-            if dil !== nothing && i < length(dil) && dil[i]
-                @show i
-                @constraint(model, δu[i] <= ηₗ)
-                @constraint(model, -ηₗ <= δu[i])
-                #@constraint(model, 0 <= δu[i] + uref[i])
-            end
-        end
-
-        #=
-        @variable(model, ηₙ) # terminal constraint trust region
-        @constraint(model, [ηₙ; 1.0; tc_lin - res.value[end]] ∈ MOI.RotatedSecondOrderCone(3))
-=#
-        @constraint(model, [ν; tc_lin] ∈ MOI.NormOneCone(2))
+        @constraint(model, tc_lin == 0)
 
         @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
         @objective(model, Min, objective_expr)
         optimize!(model)
-        @show objective_value(model)
 
-        est_cost = wₘ*value(μ) + wₙ*value(ν) + value(L) # the linearized cost estimate from the last iterate
-        xref_candidate = xref .+ value.(δx)
-        uref_candidate = uref .+ value.(δu)
-        #@show uref[dil] value.(δu)[dil]
-        res_candidate = linearize(xref_candidate, uref_candidate)
-        @show value(μ) value(ν) value(L) value(ηₚ) 0.5*sum(value.([reshape(δx, :); reshape(δu, :)])).^2 rv[end]
-        push!(delta_lin_hist, res_candidate.derivs[1])
-        #@show predicted
-        actual = res_candidate.value[1:end-1]
-        @show res_candidate.value[end]
-        lin_err = actual .- reshape(xref_candidate[:, 2:N], :)
-        #@show lin_err
-        actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + wₜ*sum(reshape(res_candidate.value[1:end-1], nunk, N-1)[2, :] .^ 2) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
-        push!(costs, est_cost)
-        push!(rcosts, actual_cost)
-        dk = last_cost - actual_cost
-        dl = last_cost - est_cost
+        W .= max.(Wmin, value.(wv) .* W ./ ϵ)
+        λ .+= sλ .* value.(wv)
+        xref .+= sX .* value.(δx)
+        uref .+= sU .* value.(δu)
+        res = linearize(xref, uref)
 
-        ρᵏ = dk/dl
-        @show norm(lin_err, 1) abs(res_candidate.value[end]) get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
-        @show ρᵏ actual_cost est_cost last_cost
-        if ρᵏ < ρ₀ # it's gotten worse by too much, increase the penalty by α
-            println("REJECT $i $r try $(r*α)")
-            r *= α
-            #sleep(0.5)
-            continue # reject the step
-        end
-        
-        if maximum(abs.(xref .- xref_candidate)) < 1e-6 && maximum(abs.(uref .- uref_candidate)) < 1e-6
-            println("DONE < tol")
-            push!(uhist, uref)
-            push!(xhist, xref)
-            push!(whist, value.(w))
-            break # done
-        end
-        if isinf(last_cost) && est_cost/actual_cost > 2
-                #println("REJECT (init) $i $r try $(r*α)")
-                #r *= α
-                #continue
-        end
-        res = res_candidate # accept the step
-        rd = collect(res.derivs[1]) # res gets clobbered for some reason by linearize?
-        rv = collect(res.value)
-        xref = xref_candidate
-        uref = uref_candidate
-        if ρᵏ < ρ₁# it's gotten worse by too much (but acceptable), increase the penalty by α
-            println("OK $i, CONTRACT $r to $(r*α)")
-            r *= α
-        elseif ρᵏ < ρ₂
-            println("OK $i $r")
-            # it's FINE go again 
-        else
-            println("OK $i, EXPAND $r TO $(r/β)")
-            # it hasn't gotten good enough decrease the penalty by a factor of β
-            r /= β
-        end
+        #@show λ
+        @show sum(value.(wv) .* W .* value.(wv))
+
+        push!(delta_lin_hist, res.derivs[1])
         push!(uhist, uref)
         push!(xhist, xref)
+        push!(costs, W)
+        push!(rcosts, λ)
         push!(whist, value.(w))
-        last_cost = actual_cost
+        rd = collect(res.derivs[1]) # res gets clobbered for some reason by linearize?
+        rv = collect(res.value)
+        @show rv[end]
         #sleep(0.5)
     end
     return (uhist, xhist, whist, costs, rcosts, delta_lin_hist, linearize, unknowns(tsys), tunable_parameters(tsys))

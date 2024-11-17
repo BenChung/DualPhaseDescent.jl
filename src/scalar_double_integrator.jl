@@ -39,15 +39,25 @@ function (f::RuntimeGeneratedFunctions.RuntimeGeneratedFunction{argnames, cache_
         rethrow(e)
     end
 end
-u,x,wh,ch,rch,dlh,lnz = trajopt(sys, (0.0, 1.0), 20, 
+prb = trajopt(sys, (0.0, 1.0), 20, 
     Dict(sys.dblint.m => 0.25), 
     Dict(sys.dblint.x => collect(LinRange(0.0, 1.0, 20)), 
     sys.dblint.v => zeros(20)), 
     [sys.dblint.x => 0.0, sys.dblint.v => 0.0], 
     (sys.dblint.f) .^ 2, 0.0, 
     0.0, 0.0, 
-    (30*abs(sys.dblint.v))^4 + (30*abs((sys.dblint.x - 1.0)))^4);
+    100*(sys.dblint.v)^2 + 100*(sys.dblint.x - 1.0)^2, 
+    (tsys) -> begin 
+        get_inp = getp(tsys, tsys.model.input.vals)
+        return function (model, δx, xref, symbolic_params, objexp)
+            ctrl = get_inp(symbolic_params)
+            @constraint(model, ctrl .<= 1.0)
+            @constraint(model, ctrl .>= -1.0)
+            return objexp
+        end
+    end);
 
+ui,xi,wi,Wh,lh,_,_,unk,_ = do_trajopt(prb; maxsteps=10, sλ=0.05,sX=0.1,sU=0.1,Wmin=100000,ϵ=1e-9); findmax(abs.(wi[end]))
 using Makie, GLMakie
 f = Figure()
 ax1 = Makie.Axis(f[1,1])

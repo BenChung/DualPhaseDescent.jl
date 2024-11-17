@@ -50,19 +50,25 @@ upper_lim1_lut = make_lim_lut(:upper_lim1)
 lower_lim1_lut = make_lim_lut(:lower_lim1)
 upper_lim2_lut = make_lim_lut(:upper_lim2)
 lower_lim2_lut = make_lim_lut(:lower_lim2)
-@register_symbolic lim_err1(u, mach, alpha1, alpha2)
 
 struct LimLookupLut{T,TF}
     mach::T
     func::TF
 end
+struct ErrLookupLut{T1,T2}
+    ubl::T1 
+    lbl::T2 
+end
+Base.nameof(::ErrLookupLut) = :ErrLookupLut
 function (ll::LimLookupLut)(alpha1, alpha2)
     mach = ll.mach
     return ll.func(mach, alpha1, alpha2)
 end
-function lim_err1(u, mach, alpha1, alpha2)
-    upper_lim1 = LimLookupLut(mach, upper_lim1_lut)(alpha1, alpha2)
-    lower_lim1 = LimLookupLut(mach, lower_lim1_lut)(alpha1, alpha2)
+
+@register_symbolic (e::ErrLookupLut)(u, mach, alpha1, alpha2)
+function (e::ErrLookupLut)(u, mach, alpha1, alpha2)
+    upper_lim1 = LimLookupLut(mach, e.ubl)(alpha1, alpha2)
+    lower_lim1 = LimLookupLut(mach, e.lbl)(alpha1, alpha2)
     return max(-(lower_lim1 + u), 0) + max(u - upper_lim1, 0)
 end
 SparseConnectivityTracer.is_der1_arg1_zero_global(::LimLookupLut) = false
@@ -71,15 +77,8 @@ SparseConnectivityTracer.is_der1_arg2_zero_global(::LimLookupLut) = false
 SparseConnectivityTracer.is_der2_arg2_zero_global(::LimLookupLut) = false
 SparseConnectivityTracer.is_der_cross_zero_global(::LimLookupLut) = false
 
-
-
-@register_symbolic lim_err2(u, mach, alpha1, alpha2)
-function lim_err2(u, mach, alpha1, alpha2)
-    upper_lim2 = LimLookupLut(mach, upper_lim2_lut)(alpha1, alpha2)
-    lower_lim2 = LimLookupLut(mach, lower_lim2_lut)(alpha1, alpha2)
-    return max(-(lower_lim2 + u), 0) + max(u - upper_lim2, 0)
-end
-
+lim_viol1 = ErrLookupLut(upper_lim1_lut, lower_lim1_lut)
+lim_viol2 = ErrLookupLut(upper_lim2_lut, lower_lim2_lut)
 
 
 #drag1 = (act_lin * cos(alpha2) + act_const) * (act_scale * control)^2
@@ -289,8 +288,8 @@ function build_example_problem()
     @named inputy = first_order_hold(N = 20, dt=0.025, tmin=0.5)
     @named inputz = first_order_hold(N = 20, dt=0.025, tmin=0.5)
 
-    @named input_fin1 = first_order_hold(N=20, dt=0.025)
-    @named input_fin2 = first_order_hold(N=20, dt=0.025)
+    @named input_fin1 = first_order_hold(N=20, dt=0.05)
+    @named input_fin2 = first_order_hold(N=20, dt=0.05)
         
     @named model = ODESystem([
         veh.u[1] ~ inputx.output.u, 
@@ -308,7 +307,7 @@ ssys = structural_simplify(probsys)
 tf_max = 15.0
 tf_min = 0.25
 pos_init = [0.0,10000.0,50000.0]
-vel_init = [0,-200,-650]
+vel_init = [0,-230,-650]
 R_init = [-deg2rad(atand(250,575)),0]
 ω_init = [0,0]
 m_init = (10088 + 10088)/10088
@@ -370,8 +369,8 @@ prb = trajopt(probsys, (0.0, 1.0), 41,
     max(tanh(Symbolics.scalarize(norm(probsys.veh.v))) * (probsys.veh.alpha - 25.0), 0.0) +
     #norm(probsys.veh.ρv .* probsys.veh.v) * probsys.veh.alpha + 
     10*ifelse(t>0.5, max(0.5^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0) + 
-    10*lim_err1(probsys.veh.ua[1], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2) + 
-    10*lim_err2(probsys.veh.ua[2], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
+    10*lim_viol1(probsys.veh.ua[1], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2) + 
+    10*lim_viol2(probsys.veh.ua[2], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
     sum((probsys.veh.pos .* pos_scale/100).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2),
     (tsys) -> begin 
         get_x = getp(tsys, tsys.model.inputx.vals)
@@ -395,6 +394,7 @@ prb = trajopt(probsys, (0.0, 1.0), 41,
     @profview 
     ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
     u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=40);
+    @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=40);
     @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
     ignst = x[end][:,21]
     ignpt = ignst[11:13]
@@ -570,6 +570,7 @@ prob_res = ODEProblem(ssys, [
         up[end][63:82], 
         up[end][83:102]]
 ])
+
 sol_res = solve(prob_res, Tsit5())
 
 retimer(t) = 10*(min(t, 0.5) * prob.ps[ssys.veh.τa] + max(t - 0.5, 0) * prob.ps[ssys.veh.τp])

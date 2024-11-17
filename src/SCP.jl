@@ -364,7 +364,7 @@ function do_trajopt(prb; maxsteps=300)
     
 
     last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
-    @show tic
+    #@show tic
     iref_params,rmk,_ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
     for i=1:maxsteps
         model = Model(Clarabel.Optimizer)
@@ -413,7 +413,6 @@ function do_trajopt(prb; maxsteps=300)
         
         for i=1:nparams
             if dil !== nothing && i < length(dil) && dil[i]
-                @show i
                 @constraint(model, δu[i] <= ηₗ)
                 @constraint(model, -ηₗ <= δu[i])
                 #@constraint(model, 0 <= δu[i] + uref[i])
@@ -429,18 +428,18 @@ function do_trajopt(prb; maxsteps=300)
         @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
         @objective(model, Min, objective_expr)
         optimize!(model)
-        @show objective_value(model)
+        #@show objective_value(model)
 
         est_cost = wₘ*value(μ) + wₙ*value(ν) + value(L) # the linearized cost estimate from the last iterate
         xref_candidate = xref .+ value.(δx)
         uref_candidate = uref .+ value.(δu)
         #@show uref[dil] value.(δu)[dil]
         res_candidate = linearize(xref_candidate, uref_candidate)
-        @show value(μ) value(ν) value(L) value(ηₚ) 0.5*sum(value.([reshape(δx, :); reshape(δu, :)])).^2 rv[end]
+        #@show value(μ) value(ν) value(L) value(ηₚ) 0.5*sum(value.([reshape(δx, :); reshape(δu, :)])).^2 rv[end]
         push!(delta_lin_hist, res_candidate.derivs[1])
         #@show predicted
         actual = res_candidate.value[1:end-1]
-        @show res_candidate.value[end]
+        #@show res_candidate.value[end]
         lin_err = actual .- reshape(xref_candidate[:, 2:N], :)
         #@show lin_err
         actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + wₜ*sum(reshape(res_candidate.value[1:end-1], nunk, N-1)[2, :] .^ 2) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
@@ -450,8 +449,8 @@ function do_trajopt(prb; maxsteps=300)
         dl = last_cost - est_cost
 
         ρᵏ = dk/dl
-        @show norm(lin_err, 1) abs(res_candidate.value[end]) get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
-        @show ρᵏ actual_cost est_cost last_cost
+        #@show norm(lin_err, 1) abs(res_candidate.value[end]) get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
+        @show actual_cost
         if ρᵏ < ρ₀ # it's gotten worse by too much, increase the penalty by α
             println("REJECT $i $r try $(r*α)")
             r *= α

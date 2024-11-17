@@ -246,7 +246,7 @@ function make_vehicle(;
         Cm ~ body_torq_lookup(mach, alpha)
 
         # todo: velocity correction
-        Symbolics.scalarize(aero_ctrl_lift .~ ua .* act_scale_lookup(mach))
+        Symbolics.scalarize(aero_ctrl_lift .~ ua .* sum((ρv .* v) .^ 2) .* act_scale_lookup(mach))
         aero_ctrl_drag ~ 
             act_lin_lookup(mach) * sum([cosd(alpha2), cosd(alpha1)] .* aero_ctrl_lift.^2) +
             act_const_lookup(mach) * sum(aero_ctrl_lift.^2)
@@ -392,8 +392,9 @@ prb = trajopt(probsys, (0.0, 1.0), 41,
     end);
 
     
-    @profview ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=20);
+    @profview 
+    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
+    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=40);
     @profview u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=300);
     ignst = x[end][:,21]
     ignpt = ignst[11:13]

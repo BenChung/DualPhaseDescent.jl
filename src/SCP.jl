@@ -60,7 +60,7 @@ function ModelingToolkitStandardLibrary.Blocks.get_sampled_data(t,
     i2 = i1 + 1
 
     t1 = (i1 - 1) * dt
-    x1 = @inbounds buffer[i1]
+    x1 = buffer[i1]
 
     if t == t1
         return x1
@@ -78,7 +78,7 @@ function ModelingToolkitStandardLibrary.Blocks.get_sampled_data(t,
         end
 
         t2 = (i2 - 1) * dt
-        x2 = @inbounds buffer[i2]
+        x2 = buffer[i2]
         return ModelingToolkitStandardLibrary.Blocks.linear_interpolation(x1, x2, t1, t2, t)
     end
 end

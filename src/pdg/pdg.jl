@@ -41,7 +41,8 @@ sol = solve(prob, Tsit5(); dtmax=0.0001)
 
 prb = descentproblem(probsys, sol, ssys);
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=40, wₗ=0);
+u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=50, wₗ=0);
+@time u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=15, wₗ=0);
 
 ignst = x[end][:,21]
 ignpt = ignst[11:13]
@@ -182,54 +183,14 @@ prob_res = ODEProblem(ssys, [
 
 sol_res = solve(prob_res, Tsit5())
 
-retimer(t) = 10*(min(t, 0.5) * prob.ps[ssys.veh.τa] + max(t - 0.5, 0) * prob.ps[ssys.veh.τp])
-
-f=Figure()
-ax1=Makie.Axis(f[1,1])
-timebase = retimer.(sol_res.t)
-lines!(ax1, timebase, (sol_res[ssys.veh.ua[1]]))
-lines!(ax1, timebase, (sol_res[ssys.veh.ua[2]]))
-ax2=Makie.Axis(f[2,1])
-lines!(ax2, timebase, (sol_res[ssys.veh.alpha1]))
-lines!(ax2, timebase, (sol_res[ssys.veh.alpha2]))
-ax3=Makie.Axis(f[3,1])
-lines!(ax3, timebase, (sol_res[ssys.veh.pos[1]]))
-lines!(ax3, timebase, (sol_res[ssys.veh.pos[2]]))
-ax4=Makie.Axis(f[4,1])
-lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[1]]))
-lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[2]]))
-lines!(ax4, timebase, (sol_res[ssys.veh.aero_force[3]]))
-f
-lines(timebase, (sol[Symbolics.scalarize(norm(ssys.veh.aero_force/(ssys.veh.m *9.8*ssys.veh.m*ssys.veh.mdry)))]))
-lines(timebase, (sol_res[ssys.veh.u[3]]))
-lines!(timebase, (sol_res[ssys.veh.u[1]]))
-lines!(timebase, (sol_res[ssys.veh.u[2]]))
-lines(timebase, (sol_res[Symbolics.scalarize(norm(ssys.veh.u))]))
-
-lines(Point3.(sol[ssys.veh.pos]))
-scatter!(Point3.(pushed))
-
-
-@time sol = solve(prob, Tsit5(); dtmax=0.1)
-
-norm(soln[2].subproblems[end].sol.vd, Inf)
-
-thr_max = maximum(norm.(eachcol(soln[1].ud[[7,5,6],:])))
-
-soln_back = soln 
-
-td2, td1 = soln[1].p
-switchover = findfirst(t -> t > 0.5, soln[1].td)
-aero_phase = map(t -> t <= soln[1].td[switchover], soln[1].td)
-powered_phase = map(t -> (t >= soln[1].td[switchover]), soln[1].td)
-tact = map(t->ifelse(t <= 0.5, t, t - 0.5), soln[1].td) .* map(t -> ifelse(t <= 0.5, td1, td2), soln[1].td) .+ 
-    map(t -> ifelse(t <= 0.5, 0.0, td1 * 0.5), soln[1].td)
-
     #GLMakie.activate!()
     import CairoMakie 
     CairoMakie.activate!()
 
+using GLMakie
 function plot_soln(sol_res)
+    
+    retimer(t) = 10*(min(t, 0.5) * sol_res.ps[ssys.veh.τa] + max(t - 0.5, 0) * sol_res.ps[ssys.veh.τp])
     f=Figure(size=(1400,900))
     a=Axis3(f[1:3,1], aspect=:data, azimuth = -0.65π, xlabel="N (m)", ylabel="E (m)", zlabel="U (m)")
     Makie.lines!(a,Point3.(sol_res(LinRange(0.0,0.5,500), idxs = ssys.veh.pos .* ssys.veh.ρpos).u))

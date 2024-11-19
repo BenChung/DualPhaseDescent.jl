@@ -314,7 +314,8 @@ function trajopt(
         :colorvec => colorvec
         ])
 end
-function do_trajopt(prb; maxsteps=300)
+
+function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
     ic = prb[:ic]
     tsys = prb[:tsys]
     l, y = prb[:avars]
@@ -357,10 +358,6 @@ function do_trajopt(prb; maxsteps=300)
     ρ₀ = 0.0
     ρ₁ = 0.25
     ρ₂ = 0.7
-    wₘ=1000
-    wₙ=50
-    wₜ=100
-    wₗ=0.1
     
 
     last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])

@@ -41,7 +41,7 @@ sol = solve(prob, Tsit5(); dtmax=0.0001)
 
 prb = descentproblem(probsys, sol, ssys);
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=40);
+u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=40, wₗ=0);
 
 ignst = x[end][:,21]
 ignpt = ignst[11:13]

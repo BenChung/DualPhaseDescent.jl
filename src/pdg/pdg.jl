@@ -82,13 +82,10 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
             push_dir = get_push_dir(symbolic_params)
             ignpt = get_ignpt(symbolic_params)
 
-            JuMP.@variable(model, cv)
-            JuMP.@variable(model, c[1:3])
+            JuMP.@variable(model, c)
             JuMP.@variable(model, wc[1:3])
-            @constraint(model, cv .>= 0)
-            @constraint(model, cv .== c)
             pos = get_pos(δx[:, 21] .+ xref[:, 21])
-            #cis = @constraint(model, pos .+ wc .== ignpt .+ c .*push_dir)
+            cis = @constraint(model, pos .+ wc .== ignpt .+ c .*push_dir)
             cvx_cst_est = () -> begin 
                 res = -100*dot(value.(get_pos(δx[:, 21] .+ xref[:, 21])) - ignpt, push_dir)
                 return res

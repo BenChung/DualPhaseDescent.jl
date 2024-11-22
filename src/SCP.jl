@@ -4,7 +4,7 @@ using OrdinaryDiffEq
 using ModelingToolkit, Symbolics, Setfield
 using SciMLSensitivity, SymbolicIndexingInterface, SciMLStructures, IntervalSets
 using ForwardDiff, ComponentArrays, DiffResults, RuntimeGeneratedFunctions
-using JuMP, Clarabel, Ipopt
+using JuMP, Clarabel
 import MathOptInterface as MOI
 
 using SparseConnectivityTracer, SparseDiffTools
@@ -315,7 +315,7 @@ function trajopt(
         ])
 end
 
-function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
+function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0)
     ic = prb[:ic]
     tsys = prb[:tsys]
     l, y = prb[:avars]
@@ -351,8 +351,6 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
     else 
         convex_cstr_fun = nothing 
     end
-
-    r = 8.0
     β = 2.0
     α = 2.0
     ρ₀ = 0.0
@@ -360,6 +358,8 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
     ρ₂ = 0.7
     
 
+    postsolve = (model) -> nothing
+    model = nothing
     last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
     #@show tic
     iref_params,rmk,_ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
@@ -368,6 +368,8 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
         set_optimizer_attribute(model, "verbose", false)
         @variable(model, δx[1:nunk,1:N])
         @variable(model, w[1:nunk,1:N-1])
+        @variable(model, wfin[1:nunk])
+        @variable(model, wl[1:N])
         @variable(model, δu[1:nparams])
         @variable(model, tc_lin)
         @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .== rd * [reshape(δx[:, 1:N], :); δu] .+ rv .- [reshape(xref[:, 2:N], :); 0])
@@ -383,39 +385,28 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
         end
 
         @variable(model, μ)
-        @variable(model, ηₚ)
-        @variable(model, ηₗ)
-        @variable(model, ηₜ)
         @variable(model, ν >= 0)
         @variable(model, L)
-        objective_expr = wₘ*μ + r*ηₚ +wₙ*ν + wₜ*ηₜ + wₗ*ηₗ + L
+
+        trv = [reshape(δx, :); reshape(δu, :)] .* [reshape(δx, :); reshape(δu, :)]
+        objective_expr = wₘ*μ + 0.5*sum(trv)*r + 0.5*sum(wfin.*wfin)*100*wₘ + 0.5*100*sum(wl .* wl) +wₙ*ν + L
+        cvx_cst_est = () -> 0.0
+        nonlin_cst = (_) -> 0.0
         if !isnothing(convex_cstr_fun)
             symbolic_params = rmk(δu .+ uref)
-            objective_expr = convex_cstr_fun(model, δx, xref, symbolic_params, objective_expr)
+            objective_expr, cvx_cst_est, nonlin_cst, postsolve = convex_cstr_fun(model, δx, xref, symbolic_params, objective_expr)
         end
 
-        @constraint(model, δx[4:5,N] .+ xref[4:5,N] .== [0.0,0.0]) # omega
-        @constraint(model, δx[6:7,N] .+ xref[6:7,N] .== [0.0,0.0]) # R
+        @constraint(model, δx[4:5,N] .+ xref[4:5,N] .+ wfin[4:5] .== [0.0,0.0]) # omega
+        @constraint(model, δx[6:7,N] .+ xref[6:7,N] .+ wfin[6:7] .== [0.0,0.0]) # R
         #@constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # v
-        @constraint(model, δx[8:10,N] .+ xref[8:10,N] .== [0.0,0.0,0.0]) # v[1:2]
-        @constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0,0.0]) # pos
+        @constraint(model, δx[8:10,N] .+ xref[8:10,N] .+ wfin[8:10] .== [0.0,0.0,0.0]) # v[1:2]
+        @constraint(model, δx[11:13,N] .+ xref[11:13,N] .+ wfin[11:13] .== [0.0,0,0.0]) # pos
         
         @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
+                
+        @constraint(model, δx[2,:] .+ xref[2,:] .+ wl .== 0)
         
-        @constraint(model, [ηₚ; 1.0; reshape(δx, :); reshape(δu, :)] ∈ MOI.RotatedSecondOrderCone(length(reshape(δx, :)) + length(reshape(δu, :)) + 2))
-        
-        @constraint(model, ηₗ>=0.0)
-
-        @constraint(model, [ηₜ; 1.0; δx[2,:] .+ xref[2,:]] ∈ MOI.RotatedSecondOrderCone(N + 2))
-        
-        for i=1:nparams
-            if dil !== nothing && i < length(dil) && dil[i]
-                @constraint(model, δu[i] <= ηₗ)
-                @constraint(model, -ηₗ <= δu[i])
-                #@constraint(model, 0 <= δu[i] + uref[i])
-            end
-        end
-
         #=
         @variable(model, ηₙ) # terminal constraint trust region
         @constraint(model, [ηₙ; 1.0; tc_lin - res.value[end]] ∈ MOI.RotatedSecondOrderCone(3))
@@ -427,7 +418,7 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
         optimize!(model)
         #@show objective_value(model)
 
-        est_cost = wₘ*value(μ) + wₙ*value(ν) + value(L) # the linearized cost estimate from the last iterate
+        est_cost = wₘ*value(μ) + wₙ*value(ν) + value(L) + cvx_cst_est() # the linearized cost estimate from the last iterate
         xref_candidate = xref .+ value.(δx)
         uref_candidate = uref .+ value.(δu)
         #@show uref[dil] value.(δu)[dil]
@@ -439,7 +430,7 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
         #@show res_candidate.value[end]
         lin_err = actual .- reshape(xref_candidate[:, 2:N], :)
         #@show lin_err
-        actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + wₜ*sum(reshape(res_candidate.value[1:end-1], nunk, N-1)[2, :] .^ 2) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end])
+        actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + wₜ*sum(reshape(res_candidate.value[1:end-1], nunk, N-1)[2, :] .^ 2) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end]) + nonlin_cst(res_candidate.value)
         push!(costs, est_cost)
         push!(rcosts, actual_cost)
         dk = last_cost - actual_cost
@@ -489,5 +480,10 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wₗ=0.1)
         last_cost = actual_cost
         #sleep(0.5)
     end
+
+    postsolve(model)
+
+
+
     return (uhist, xhist, whist, costs, rcosts, delta_lin_hist, linearize, unknowns(tsys), tunable_parameters(tsys))
 end

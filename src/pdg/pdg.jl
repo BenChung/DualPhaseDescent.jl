@@ -1,6 +1,8 @@
 include("dynamics.jl")
 include("lut_ship.jl")
 include("problem.jl")
+include("stupid_convex_hull.jl")
+using StatsBase
 
 probsys = build_example_problem()
 ssys = structural_simplify(probsys)
@@ -8,8 +10,8 @@ ssys = structural_simplify(probsys)
 tf_max = 15.0
 tf_min = 0.25
 pos_init = [500.0,40000.0,40000.0]
-vel_init = [0,-620,-500]
-R_init = [-deg2rad(atand(620,500)),0]
+vel_init = [0,-750,-500]
+R_init = [-deg2rad(atand(750,500)),0]
 ω_init = [0,0]
 m_init = (10088 + 10088)/10088
 
@@ -35,13 +37,13 @@ prob = ODEProblem(ssys, [
     ssys.veh.ρpos => pos_scale
     ssys.input_fin1.vals => 0.0*ones(20)
     ssys.input_fin2.vals => -0.0*ones(20) # 0.0*ones(20) #
-    ssys.inputz.vals => 0.1 * ones(20)
+    ssys.inputz.vals => 0.0 * ones(20)
 ])
 sol = solve(prob, Tsit5(); dtmax=0.0001)
 
 prb = descentproblem(probsys, sol, ssys);
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=50, wₗ=0);
+@time u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100);
 @time u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=15, wₗ=0);
 
 ignst = x[end][:,21]
@@ -79,16 +81,33 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
             push_dir = get_push_dir(symbolic_params)
             ignpt = get_ignpt(symbolic_params)
 
-            JuMP.@variable(model, c)
-            @constraint(model, get_pos(δx[:, 21] .+ xref[:, 21]) .== ignpt .+ c .*push_dir)
-            return objexp - 10*c
+            JuMP.@variable(model, cv)
+            JuMP.@variable(model, c[1:3])
+            JuMP.@variable(model, wc[1:3])
+            @constraint(model, cv .>= 0)
+            @constraint(model, cv .== c)
+            pos = get_pos(δx[:, 21] .+ xref[:, 21])
+            #cis = @constraint(model, pos .+ wc .== ignpt .+ c .*push_dir)
+            cvx_cst_est = () -> begin 
+                res = -100*dot(value.(get_pos(δx[:, 21] .+ xref[:, 21])) - ignpt, push_dir)
+                return res
+            end
+            (nst,npt) = size(δx)
+            nonlin_cst = (res) -> begin 
+                outp = -100*dot(get_pos(reshape(res[1:end-1], (nst, npt-1))[:,20]) - ignpt, push_dir)
+                return outp
+            end
+            function postsolve(model)
+            end
+            return objexp + 100000*sum(wc.*wc) - 100*dot(get_pos(δx[:, 21] .+ xref[:, 21]) - ignpt, push_dir), cvx_cst_est, nonlin_cst, postsolve
         end
     end,
     custsys=(sys,l,y) -> begin 
         @parameters push_dir[1:3]=[1,0,0], [tunable=false,input=true]
         @parameters ignpt[1:3]=[0,0,0], [tunable=false,input=true]
         function add_divert!(i, u, p, c)
-            i[u.l] -= 10*dot([i.u[u.posx], i.u[u.posy], i.u[u.posz]] .- i.ps[p.ignpt], i.ps[p.push_dir])
+            mod = 100*norm([i.u[u.posx], i.u[u.posy], i.u[u.posz]] .- i.ps[p.ignpt])
+           # i[u.l] = 5-mod
         end
         @named augmenting=ODESystem(Equation[], t, [], [push_dir,ignpt]; discrete_events=[
             [0.5] => (add_divert!, [l => :l, probsys.veh.pos[1] => :posx, probsys.veh.pos[2] => :posy, probsys.veh.pos[3] => :posz], [push_dir,ignpt], [], nothing)
@@ -97,26 +116,61 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
     end
 );
 
-    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
 
-    upd_push_dir = setp(prb_divert[:tsys], prb_divert[:tsys].push_dir)
+#amazing combo: 
+#= 
+ignpt: 
+ 0.033853782896746745
+ 1.5952570619227697
+ 1.995072685470087
+adir:
+     1.3536897452549184
+ 12811.527001714725
+ 15987.253781995847
+ =#
+
+    upd_pushdir = setp(prb_divert[:tsys], prb_divert[:tsys].push_dir)
     upd_ignpt = setp(prb_divert[:tsys], prb_divert[:tsys].ignpt)
 
     dir_rand = rand(3)
     dir_rand = dir_rand/norm(dir_rand)
-    upd_push_dir(prb_divert[:pars], [0,0,1])
+    upd_push_dir(prb_divert[:pars], (-adir/norm(adir)))
     upd_ignpt(prb_divert[:pars], ignpt)
-    up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50);
+    
+    @profview ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
+    up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
 
-    pushed = []
+    dirs = []
+    pushed = Vector{Float64}[]
 
-    for i=1:10
-        dir_rand = rand(3)
+    ph = nothing
+    for i=1:100
+        dir_rand = rand(3) - [0.5, 0.5, 0.5]
         dir_rand = dir_rand/norm(dir_rand)
         upd_push_dir(prb_divert[:pars], dir_rand)
-        up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=25);
+        upd_ignpt(prb_divert[:pars], if !isempty(pushed) && length(pushed) > 4
+            ph = polyhedron(vrep(convert(Vector{Vector{Float64}}, pushed)), QHull.Library())
+            removevredundancy!(ph)
+            sample(collect(points(ph)))
+        else 
+            ignpt
+        end)
+        up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
+        if maximum(abs.(whp[end])) > 1e-3
+            println("SOLN REJECT > tol")
+            continue 
+        end
         push!(pushed, xp[end][11:13,21])
+        push!(dirs, dir_rand)
     end
+    ph = polyhedron(vrep(convert(Vector{Vector{Float64}}, pushed)), QHull.Library())
+    removevredundancy!(ph)
+    Makie.mesh!(Polyhedra.Mesh(ph), color=:blue)
+    Makie.lines(Point3.(sol_ws[ssys.veh.pos]))
+    scatter!(Point3.(pushed))
+    scatter!(Point3.([xp[end][end-2:end,21]]), color=:red)
+
+
 
     
 f = Figure()

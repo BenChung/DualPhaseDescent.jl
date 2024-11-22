@@ -257,7 +257,7 @@ function trajopt(
     colorvec = matrix_colors(sparsity_pattern)
 
     dx_ref = zeros(nunk * (N-1) + 1)
-    jacfun = (J,x) -> J .= lnz(adaptive=true, dtmax=0.001)(x)
+    jacfun = (J,x) -> J .= lnz(adaptive=true, dtmax=0.001, dtmin=1e-7,force_dtmin=true)(x)
     cache = ForwardColorJacCache(
         jacfun,
         ComponentArray(u0=collect(iguess[:, 1:N]), params=collect(tunable));
@@ -446,7 +446,7 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0)
             continue # reject the step
         end
         
-        if maximum(abs.(xref .- xref_candidate)) < 1e-6 && maximum(abs.(uref .- uref_candidate)) < 1e-6
+        if maximum(abs.(xref .- xref_candidate)) < 1e-5 && maximum(abs.(uref .- uref_candidate)) < 1e-5
             println("DONE < tol")
             push!(uhist, uref)
             push!(xhist, xref)

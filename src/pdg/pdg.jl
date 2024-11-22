@@ -1,7 +1,9 @@
 include("dynamics.jl")
 include("lut_ship.jl")
 include("problem.jl")
-include("stupid_convex_hull.jl")
+
+using Quickhull
+using GeometryBasics
 using StatsBase
 
 probsys = build_example_problem()
@@ -43,8 +45,7 @@ sol = solve(prob, Tsit5(); dtmax=0.0001)
 
 prb = descentproblem(probsys, sol, ssys);
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-@time u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100);
-@time u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=15, wₗ=0);
+u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100);
 
 ignst = x[end][:,21]
 ignpt = ignst[11:13]
@@ -116,126 +117,81 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
     end
 );
 
-
-#amazing combo: 
-#= 
-ignpt: 
- 0.033853782896746745
- 1.5952570619227697
- 1.995072685470087
-adir:
-     1.3536897452549184
- 12811.527001714725
- 15987.253781995847
- =#
+function propagate_sol(u)
+    prob_res = ODEProblem(ssys, [
+        ssys.veh.m => m_init
+        ssys.veh.ω => ω_init
+        ssys.veh.R => R_init
+        ssys.veh.pos => pos_init ./ pos_scale
+        ssys.veh.v => vel_init ./ vel_scale
+    ], (0.0, 1.0), [
+        ssys.veh.ρv => vel_scale;
+        ssys.veh.ρpos => pos_scale;
+        denamespace.((ssys, ), tp) .=> [
+            u[end][1], #10*u[end][1], 
+            u[end][2], 
+            u[end][3:22], 
+            u[end][23:42], 
+            u[end][43:62], 
+            u[end][63:82], 
+            u[end][83:102]]
+    ])
+    return solve(prob_res, Tsit5())
+end
 
     upd_pushdir = setp(prb_divert[:tsys], prb_divert[:tsys].push_dir)
     upd_ignpt = setp(prb_divert[:tsys], prb_divert[:tsys].ignpt)
+    upd_fuel_wt = setp(prb_divert[:tsys], prb_divert[:tsys].obj_weight_fuel)
 
-    dir_rand = rand(3)
-    dir_rand = dir_rand/norm(dir_rand)
-    upd_push_dir(prb_divert[:pars], (-adir/norm(adir)))
+    upd_pushdir(prb_divert[:pars], [0.0,0.0,1.0])
     upd_ignpt(prb_divert[:pars], ignpt)
+    upd_fuel_wt(prb_divert[:pars], 0.0)
     
-    @profview ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
+    ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
     up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
 
     dirs = []
     pushed = Vector{Float64}[]
 
+    rejected = 0
+    errors = 0
     ph = nothing
     for i=1:100
+        println("====== $i $i $i $i $i ======")
         dir_rand = rand(3) - [0.5, 0.5, 0.5]
         dir_rand = dir_rand/norm(dir_rand)
-        upd_push_dir(prb_divert[:pars], dir_rand)
+        upd_pushdir(prb_divert[:pars], dir_rand)
         upd_ignpt(prb_divert[:pars], if !isempty(pushed) && length(pushed) > 4
-            ph = polyhedron(vrep(convert(Vector{Vector{Float64}}, pushed)), QHull.Library())
-            removevredundancy!(ph)
-            sample(collect(points(ph)))
+            ph = quickhull(convert(Vector{Vector{Float64}}, pushed))
+            sample(ph.pts)
         else 
             ignpt
         end)
-        up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
-        if maximum(abs.(whp[end])) > 1e-3
-            println("SOLN REJECT > tol")
-            continue 
+        try
+            up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
+            propagated = propagate_sol(up)
+            if norm(propagated[ssys.veh.pos .* ssys.veh.ρpos][end]) > 20 || maximum(abs.(wh[end])) > 1e-3
+                println("SOLN REJECT > tol")
+                rejected += 1
+                continue 
+            end
+            
+            push!(pushed, xp[end][11:13,21])
+            push!(dirs, dir_rand)
+        catch e 
+            println("caught error, continuing")
+            errors += 1
         end
-        push!(pushed, xp[end][11:13,21])
-        push!(dirs, dir_rand)
     end
-    ph = polyhedron(vrep(convert(Vector{Vector{Float64}}, pushed)), QHull.Library())
-    removevredundancy!(ph)
-    Makie.mesh!(Polyhedra.Mesh(ph), color=:blue)
+    ph = quickhull(convert(Vector{Vector{Float64}}, pushed))
+    using GLMakie
     Makie.lines(Point3.(sol_ws[ssys.veh.pos]))
+    Makie.wireframe!(GeometryBasics.Mesh(GeometryBasics.Point3.(ph.pts), facets(ph)), color=:blue)
     scatter!(Point3.(pushed))
     scatter!(Point3.([xp[end][end-2:end,21]]), color=:red)
 
-
-
-    
-f = Figure()
-ax = Makie.Axis(f[1,1])
-for i in eachindex(x[1:5:end])
-    lines!(ax, x[i][end-10,:])
-end
-f
-
-
-prob = ODEProblem(ssys, [
-    ssys.veh.m => m_init
-    ssys.veh.ω => ω_init
-    ssys.veh.R => R_init
-    ssys.veh.pos => pos_init ./ pos_scale
-    ssys.veh.v => vel_init ./ vel_scale
-], (0.0, 1/20.0), [
-    ssys.veh.ρv => vel_scale;
-    ssys.veh.ρpos => pos_scale;
-    denamespace.((ssys, ), tp) .=> [
-        u[end][1], #10*u[end][1], 
-        u[end][2:21], 
-        u[end][22:end]]
-])
-sol = solve(prob, Tsit5(); dtmax=0.001)
-
-
-prob_res = ODEProblem(ssys, [
-    ssys.veh.m => m_init
-    ssys.veh.ω => ω_init
-    ssys.veh.R => R_init
-    ssys.veh.pos => pos_init ./ pos_scale
-    ssys.veh.v => vel_init ./ vel_scale
-], (0.0, 1.0), [
-    ssys.veh.ρv => vel_scale;
-    ssys.veh.ρpos => pos_scale;
-    denamespace.((ssys, ), tp) .=> [
-        u[end][1], #10*u[end][1], 
-        u[end][2], 
-        u[end][3:22], 
-        u[end][23:42], 
-        u[end][43:62], 
-        u[end][63:82], 
-        u[end][83:102]]
-])
-prob_res = ODEProblem(ssys, [
-    ssys.veh.m => m_init
-    ssys.veh.ω => ω_init
-    ssys.veh.R => R_init
-    ssys.veh.pos => pos_init ./ pos_scale
-    ssys.veh.v => vel_init ./ vel_scale
-], (0.0, 1.0), [
-    ssys.veh.ρv => vel_scale;
-    ssys.veh.ρpos => pos_scale;
-    denamespace.((ssys, ), tp) .=> [
-        up[end][1], #10*up[end][1], 
-        up[end][2], 
-        up[end][3:22], 
-        up[end][23:42], 
-        up[end][43:62], 
-        up[end][63:82], 
-        up[end][83:102]]
-])
-
-sol_res = solve(prob_res, Tsit5())
+sol_res = propagate_sol(u)
+sol_res = propagate_sol(up)
 
     #GLMakie.activate!()
     import CairoMakie 

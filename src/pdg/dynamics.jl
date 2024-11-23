@@ -199,7 +199,7 @@ function make_vehicle(;
     iJz_wet=[1/555803, 1/555803, 1/9105],
     iJz_dry=[1/466296, 1/466296, 1/5326],
     mdry=10516.0,
-    fuel_mass=19516.0,
+    fuel_mass=19516.0 - 10516.0,
     engine_offset = [0, 0, -4], name)
     @parameters kerbin_center[1:3] = [0.0,0.0,-600000], [tunable = false]
     @parameters kerbin_radius = 600000.0, [tunable = false]
@@ -211,12 +211,16 @@ function make_vehicle(;
     @parameters fin_offset[1:3] = [0, 0, 9.2], [tunable = false]
     @parameters ISP = 300, [tunable = false] fuel_mass = fuel_mass, [tunable = false] mdry = mdry, [tunable = false]
     @parameters ρ₀=1.225, [tunable = false]
-    @parameters ρω[1:2]=ones(3), [tunable = false] ρR[1:2]=ones(2), [tunable = false] ρv[1:3]=ones(3), [tunable = false] ρpos[1:3]=ones(3), [tunable = false]
+
+    @parameters ρω[1:2]=ones(3), [tunable = false] ρR[1:2]=ones(2), [tunable = false] ρv[1:3]=ones(3), [tunable = false] ρpos[1:3]=ones(3), [tunable = false] ρm=mdry, [tunable = false]
+
     @parameters ωk[1:3]=RotY(deg2rad(angle_from_pole)) * [0,0, 2π/21549.425], [tunable=false] # 2 pi radians every 21549s
     @parameters μk=3.5316e12, [tunable=false]
 
     Symbolics.@variables pos(t)[1:3] v(t)[1:3] m(t) propellant_fraction(t)
     Symbolics.@variables R(t)[1:2] ω(t)[1:2] th(t)[1:3] speed_of_sound(t)
+
+    Symbolics.@variables ωp(t)[1:2] Rp(t)[1:2] vp(t)[1:3] posp(t)[1:3] mp(t)
 
     Symbolics.@variables free_dynamic_pressure(t) phi(t) vel(t) iJz(t)[1:3] alpha1(t) alpha2(t)
     Symbolics.@variables aero_moment(t) aero_torque(t)[1:3] torque(t)[1:3] aero_force(t)[1:3] Cdfs(t) Clfs(t) net_torque(t)[1:3]
@@ -228,16 +232,22 @@ function make_vehicle(;
     @parameters τa [tunable = true, dilation=true] τp [tunable=true, dilation=true]
     
     eqns = expand_derivatives.([
-        kerbin_rel .~ ρpos.*pos - kerbin_center
+        ωp .~ ρω .* ω
+        Rp .~ ρR .* R
+        vp .~ ρv .* v
+        posp .~ ρpos .* pos
+        mp ~ ρm * m
+
+        kerbin_rel .~ posp - kerbin_center
         spherical_alt ~ norm(kerbin_rel) - kerbin_radius
         earth_equiv_alt ~ 7963.75*(spherical_alt/1000)/(6371 + 1.25*(spherical_alt/1000))*1000
         temp ~ temp_vs_alt(earth_equiv_alt)
         speed_of_sound ~ mach_vs_temp(temp)
-        mach ~ norm(ρv.*v)/speed_of_sound
-        alpha ~ angle(v, rquat(ρR .* R) * [0,0,-1]);
-        local_wind_vec .~ iquat(ρR .* R) * Symbolics.scalarize(v);
-        alpha1 ~ angle_in_plane(vel_dir, rquat(ρR .* R) * [0,0,-1], lift_dir2);
-        alpha2 ~ angle_in_plane(vel_dir, rquat(ρR .* R) * [0,0,-1], lift_dir1);
+        mach ~ norm(vp)/speed_of_sound
+        alpha ~ angle(v, rquat(Rp) * [0,0,-1]);
+        local_wind_vec .~ iquat(Rp) * Symbolics.scalarize(v);
+        alpha1 ~ angle_in_plane(vel_dir, rquat(Rp) * [0,0,-1], lift_dir2);
+        alpha2 ~ angle_in_plane(vel_dir, rquat(Rp) * [0,0,-1], lift_dir1);
         ρᵣ ~ ρ_kg_m³_fwd(p_Pa_fwd(earth_equiv_alt), T₀_K)/ρ₀
 
         Cd ~ body_drag_lookup(mach, alpha)
@@ -245,39 +255,40 @@ function make_vehicle(;
         Cm ~ body_torq_lookup(mach, alpha)
 
         # todo: velocity correction
-        Symbolics.scalarize(aero_ctrl_lift .~ ua .* sum((ρv .* v) .^ 2) .* act_scale_lookup(mach))
+        Symbolics.scalarize(aero_ctrl_lift .~ ua .* sum(vp .^ 2) .* act_scale_lookup(mach))
         aero_ctrl_drag ~ 
             act_lin_lookup(mach) * sum([cosd(alpha2), cosd(alpha1)] .* aero_ctrl_lift.^2) +
             act_const_lookup(mach) * sum(aero_ctrl_lift.^2)
-        Symbolics.scalarize(vel_dir .~ normalize_vec(ρv .* v))
+        Symbolics.scalarize(vel_dir .~ normalize_vec(vp))
         Symbolics.scalarize(lift_dir1 .~ lookat_rmat([0,0,-1],[0,1,0],Symbolics.scalarize(vel_dir)) * [1,0,0])
         Symbolics.scalarize(lift_dir2 .~ lookat_rmat([0,0,-1],[0,1,0],Symbolics.scalarize(vel_dir)) * [0,1,0])
-        #Symbolics.scalarize(lift_dir1 .~ normalize_vec(cross(rquat(ρR .* R) * [0,1,0], ρv .* v)))
-        #Symbolics.scalarize(lift_dir2 .~ normalize_vec(cross(ρv .* v, cross(rquat(ρR .* R) * [0,1,0], ρv .* v))))
+        #Symbolics.scalarize(lift_dir1 .~ normalize_vec(cross(rquat(Rp) * [0,1,0], vp)))
+        #Symbolics.scalarize(lift_dir2 .~ normalize_vec(cross(vp, cross(rquat(Rp) * [0,1,0], vp))))
         Symbolics.scalarize(aero_ctrl_force .~ 1000 * (lift_dir1 .* aero_ctrl_lift[1] .+ lift_dir2 .* aero_ctrl_lift[2] .- aero_ctrl_drag * v/norm(v)))
         
         aero_force .~ Symbolics.scalarize(
-            Cl .* ρᵣ .* 1000 .* (cross(ρv .* v, cross(rquat(ρR .* R) * [0,0,-1],ρv .* v)))
-            .- Cd * ρᵣ * 1000 *norm(Symbolics.scalarize(ρv .* v))*(ρv .* v)
+            Cl .* ρᵣ .* 1000 .* (cross(vp, cross(rquat(Rp) * [0,0,-1],vp)))
+            .- Cd * ρᵣ * 1000 *norm(Symbolics.scalarize(vp))*(vp)
             .+ ρᵣ *aero_ctrl_force) # Cl/Cd come out in kN 
 
-        Symbolics.scalarize(body_torque .~ Cm * 1000 * cross([0,0,-1], iquat(ρR .* R) * Symbolics.scalarize(ρv .* v)) * norm(ρv .* v))
-        Symbolics.scalarize(ctrl_torque .~ cross([0,0,9.18], iquat(ρR .* R) * Symbolics.scalarize(aero_ctrl_force))) # 9.18 = height up the rocket (in m) of the fins
+        Symbolics.scalarize(body_torque .~ Cm * 1000 * cross([0,0,-1], iquat(Rp) * Symbolics.scalarize(vp)) * norm(vp))
+        Symbolics.scalarize(ctrl_torque .~ cross([0,0,9.18], iquat(Rp) * Symbolics.scalarize(aero_ctrl_force))) # 9.18 = height up the rocket (in m) of the fins
 
-        iJz .~ iJz_dry # + iJz_delta * propellant_fraction;
+        propellant_fraction ~ (mp - mdry)/fuel_mass
+        iJz .~ iJz_dry + iJz_delta * propellant_fraction;
         τc ~ 10*ifelse(t >= 0.5, τp, τa)
         th .~ u * 980000
-        D(m) ~ -τc*sqrt_smooth(max(sum(th.^2), 0.0))/(ISP * 9.8 * mdry); 
+        D(ρm * m) ~ -τc*sqrt_smooth(max(sum(th.^2), 0.0))/(ISP * 9.8); 
         net_torque .~ cross(engine_offset, th) .+ ρᵣ * (ctrl_torque .+ body_torque); # TODO: change 50
-        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(ρR.*R) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 10*ω);
-        D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(ρR.*R), Symbolics.scalarize(ρω.*ω));
+        D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(Rp) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 10*ωp);
+        D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(Rp), Symbolics.scalarize(ωp));
 
         centrifugal_accel .~ cross(ωk, cross(ωk, kerbin_rel))
-        coriolis_accel .~ 2*cross(ωk, ρv.*v)
+        coriolis_accel .~ 2*cross(ωk, vp)
         g_accel .~ -kerbin_rel .* μk/Symbolics.scalarize(sum(kerbin_rel.^2)^(3//2))
-        acc .~ (g_accel .+ (iquat(ρR .* R) * Symbolics.scalarize(th))/(m*mdry) .+ aero_force/(m*mdry) .- centrifugal_accel .- coriolis_accel)
+        acc .~ (g_accel .+ (iquat(Rp) * Symbolics.scalarize(th))/(mp) .+ aero_force/(mp) .- centrifugal_accel .- coriolis_accel)
         Symbolics.scalarize(D.(ρv.*v) .~ τc.*acc);
-        Symbolics.scalarize(D.(ρpos.*pos) .~ τc.*(v .* ρv));
+        Symbolics.scalarize(D.(ρpos.*pos) .~ τc.*(vp));
     ])
     return ODESystem(expand_derivatives.(Symbolics.scalarize.(eqns)), t; name = name)
 end

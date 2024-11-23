@@ -15,7 +15,7 @@ pos_init = [500.0,40000.0,40000.0]
 vel_init = [0,-750,-500]
 R_init = [-deg2rad(atand(750,500)),0]
 ω_init = [0,0]
-m_init = 19516.0/10516.0
+m_init = 19516.0
 
 pos_final = [0,0,0.0]
 vel_final = [0,0,0.0]
@@ -26,8 +26,9 @@ R_scale = [1.0,1.0]
 pos_scale = [10000.0,10000.0,10000.0]
 vel_scale = [100.0,100.0,100.0]
 ω_scale = [1.0,1.0]
+m_scale = 10516.0
 prob = ODEProblem(ssys, [
-    ssys.veh.m => m_init
+    ssys.veh.m => m_init / m_scale
     ssys.veh.ω => ω_init
     ssys.veh.R => R_init ./ R_scale
     ssys.veh.pos => pos_init ./ pos_scale
@@ -37,6 +38,7 @@ prob = ODEProblem(ssys, [
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale
     ssys.veh.ρpos => pos_scale
+    ssys.veh.ρm => m_scale
     ssys.input_fin1.vals => 0.0*ones(20)
     ssys.input_fin2.vals => -0.0*ones(20) # 0.0*ones(20) #
     ssys.inputz.vals => 0.0 * ones(20)
@@ -52,7 +54,7 @@ ignpt = ignst[11:13]
 pushdir = [1.0, 0.0, 0.0]
 
 prob_ws = ODEProblem(ssys, [
-    ssys.veh.m => m_init
+    ssys.veh.m => m_init / m_scale
     ssys.veh.ω => ω_init
     ssys.veh.R => R_init
     ssys.veh.pos => pos_init ./ pos_scale
@@ -60,6 +62,7 @@ prob_ws = ODEProblem(ssys, [
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale;
     ssys.veh.ρpos => pos_scale;
+    ssys.veh.ρm => m_scale;
     denamespace.((ssys, ), tp) .=> [
         u[end][1], #10*u[end][1], 
         u[end][2], 
@@ -114,9 +117,9 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
     end
 );
 
-function propagate_sol(u)
+function propagate_sol(ssys, u)
     prob_res = ODEProblem(ssys, [
-        ssys.veh.m => m_init
+        ssys.veh.m => m_init / m_scale
         ssys.veh.ω => ω_init
         ssys.veh.R => R_init
         ssys.veh.pos => pos_init ./ pos_scale
@@ -124,6 +127,7 @@ function propagate_sol(u)
     ], (0.0, 1.0), [
         ssys.veh.ρv => vel_scale;
         ssys.veh.ρpos => pos_scale;
+        ssys.veh.ρm => m_scale;
         denamespace.((ssys, ), tp) .=> [
             u[end][1], #10*u[end][1], 
             u[end][2], 
@@ -187,8 +191,8 @@ end
     scatter!(Point3.(pushed))
     scatter!(Point3.([xp[end][end-2:end,21]]), color=:red)
 
-sol_res = propagate_sol(u)
-sol_res = propagate_sol(up)
+sol_res = propagate_sol(ssys, u)
+sol_res = propagate_sol(ssys, up)
 plot_soln(sol_res)
 
     #GLMakie.activate!()
@@ -201,32 +205,32 @@ function plot_soln(sol_res)
     retimer(t) = 10*(min(t, 0.5) * sol_res.ps[ssys.veh.τa] + max(t - 0.5, 0) * sol_res.ps[ssys.veh.τp])
     f=Figure(size=(1400,900))
     a=Axis3(f[1:3,1], aspect=:data, azimuth = -0.65π, xlabel="N (m)", ylabel="E (m)", zlabel="U (m)")
-    Makie.lines!(a,Point3.(sol_res(LinRange(0.0,0.5,500), idxs = ssys.veh.pos .* ssys.veh.ρpos).u))
-    Makie.lines!(a,Point3.(sol_res(LinRange(0.5,1.0,500), idxs = ssys.veh.pos .* ssys.veh.ρpos).u))
+    Makie.lines!(a,Point3.(sol_res(LinRange(0.0,0.5,500), idxs = ssys.veh.posp).u))
+    Makie.lines!(a,Point3.(sol_res(LinRange(0.5,1.0,500), idxs = ssys.veh.posp).u))
 
     naxes = 30
     for rp in zip(
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.pos .* ssys.veh.ρpos).u),
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.pos .* ssys.veh.ρpos .+ rquat(ssys.veh.R) * [0,0,1000]).u))
+        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp).u),
+        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp .+ rquat(ssys.veh.R) * [0,0,1000]).u))
         Makie.lines!(a, [rp[1], rp[2]], color=:blue)
     end
 
     for rp in zip(
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.pos .* ssys.veh.ρpos).u),
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.pos .* ssys.veh.ρpos .+ rquat(ssys.veh.R) * [0,1000,0]).u))
+        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp).u),
+        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp .+ rquat(ssys.veh.R) * [0,1000,0]).u))
         Makie.lines!(a, [rp[1], rp[2]], color=:green)
     end
 
     for rp in zip(
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.pos .* ssys.veh.ρpos).u),
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.pos .* ssys.veh.ρpos .+ rquat(ssys.veh.R) * [1000,0,0]).u))
+        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp).u),
+        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp .+ rquat(ssys.veh.R) * [1000,0,0]).u))
         Makie.lines!(a, [rp[1], rp[2]], color=:red)
     end
 
     b1 = Makie.Axis(f[1, 2], title="Position")
     b2 = Makie.Axis(f[1, 2], yaxisposition = :right)
-    unpowered_pos = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.pos .* ssys.veh.ρpos)
-    powered_pos = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.pos .* ssys.veh.ρpos)
+    unpowered_pos = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.posp)
+    powered_pos = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.posp)
     zm = Makie.lines!(b1, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 1), label="N(m)", color=:red)
     xm = Makie.lines!(b2, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 2), label="E(m)", color=:green)
     ym = Makie.lines!(b2, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 3), label="U(m)", color=:blue)
@@ -242,8 +246,8 @@ function plot_soln(sol_res)
     vi = [9, 10, 11]
     b3 = Makie.Axis(f[2, 2], title="U Velocity (m/s)")
     b4 = Makie.Axis(f[3, 2], title="N-E Velocity (m/s)", xlabel="Time (s)")
-    unpowered_vel = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.v .* ssys.veh.ρv)
-    powered_vel = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.v .* ssys.veh.ρv)
+    unpowered_vel = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.vp)
+    powered_vel = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.vp)
     zvm = Makie.lines!(b4, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 1), color=:red)
     xvm = Makie.lines!(b4, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 2), color=:green)
     yvm = Makie.lines!(b3, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 3), color=:blue)
@@ -328,13 +332,13 @@ function plot_soln(sol_res)
     zvm = Makie.lines!(b9, retimer.(powered_vel.t), getindex.(u_powered.u, 1))
 
     b10 = Makie.Axis(f[2, 5], title="Acceleration from thrust (Body, m/s^2)")
-    th_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.th/(ssys.veh.m*ssys.veh.mdry))
+    th_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.th/(ssys.veh.mp))
     zvm = Makie.lines!(b10, retimer.(powered_vel.t), getindex.(th_powered.u, 1), color=:red)
     xvm = Makie.lines!(b10, retimer.(powered_vel.t), getindex.(th_powered.u, 2), color=:green)
     yvm = Makie.lines!(b10, retimer.(powered_vel.t), getindex.(th_powered.u, 3), color=:blue)
 
     b11 = Makie.Axis(f[3, 5], title="Fuel Mass (kg)", limits=(nothing,(0.0,12000)), xlabel="Time (s)")
-    m_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.m*ssys.veh.mdry - ssys.veh.mdry)
+    m_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.mp - ssys.veh.mdry)
     zvm = Makie.lines!(b11, retimer.(powered_vel.t), m_powered.u)
     f
 end

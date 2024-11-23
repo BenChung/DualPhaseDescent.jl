@@ -192,15 +192,15 @@ function lookat_rmat(f, p, tgt) # moller and hughes
     (I(3) - 2/dot(u,u) * u * u' - 2/dot(v,v) * v * v' + 4*(dot(u,v))/(dot(u,u)*dot(v,v))*v*u')
 end
 
-ksc_lat = -6/60 + 9/3600 # 0d 6m 9s S
+ksc_lat = -(6/60 + 9/3600) # 0d 6m 9s S
 angle_from_pole = 90 - ksc_lat # around east/2 axis
 
 function make_vehicle(; 
-    iJz_wet=[1/797918.19, 1/797918.19, 1/8197],
-    iJz_dry=[1/444490.19, 1/444490.19, 1/3955],
-    mdry=10088,
-    fuel_mass=10088,
-    engine_offset = [0, 0, -8], name)
+    iJz_wet=[1/555803, 1/555803, 1/9105],
+    iJz_dry=[1/466296, 1/466296, 1/5326],
+    mdry=10516.0,
+    fuel_mass=19516.0,
+    engine_offset = [0, 0, -4], name)
     @parameters kerbin_center[1:3] = [0.0,0.0,-600000], [tunable = false]
     @parameters kerbin_radius = 600000.0, [tunable = false]
     @parameters iJz_delta[1:3] = iJz_wet - iJz_dry, [tunable = false]#.*u"kg" .* u"m^2")
@@ -208,9 +208,9 @@ function make_vehicle(;
     @parameters wind[1:3] = [0,0,0], [tunable = false]
     @parameters Cmdot = 4.0, [tunable = false]
     @parameters engine_offset[1:3] = engine_offset, [tunable = false]
-    @parameters fin_offset[1:3] = [0, 0, 1], [tunable = false]
+    @parameters fin_offset[1:3] = [0, 0, 9.2], [tunable = false]
     @parameters ISP = 300, [tunable = false] fuel_mass = fuel_mass, [tunable = false] mdry = mdry, [tunable = false]
-    @parameters speed_of_sound = 340, [tunable = false] ρ₀=1.225, [tunable = false]
+    @parameters ρ₀=1.225, [tunable = false]
     @parameters ρω[1:2]=ones(3), [tunable = false] ρR[1:2]=ones(2), [tunable = false] ρv[1:3]=ones(3), [tunable = false] ρpos[1:3]=ones(3), [tunable = false]
     @parameters ωk[1:3]=RotY(deg2rad(angle_from_pole)) * [0,0, 2π/21549.425], [tunable=false] # 2 pi radians every 21549s
     @parameters μk=3.5316e12, [tunable=false]

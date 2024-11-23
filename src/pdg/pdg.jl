@@ -15,7 +15,7 @@ pos_init = [500.0,40000.0,40000.0]
 vel_init = [0,-750,-500]
 R_init = [-deg2rad(atand(750,500)),0]
 ω_init = [0,0]
-m_init = (10088 + 10088)/10088
+m_init = 19516.0/10516.0
 
 pos_final = [0,0,0.0]
 vel_final = [0,0,0.0]
@@ -153,7 +153,7 @@ end
     rejected = 0
     errors = 0
     ph = nothing
-    for i=1:100
+    for i=1:1000
         println("====== $i $i $i $i $i ======")
         dir_rand = rand(3) - [0.5, 0.5, 0.5]
         dir_rand = dir_rand/norm(dir_rand)
@@ -189,6 +189,7 @@ end
 
 sol_res = propagate_sol(u)
 sol_res = propagate_sol(up)
+plot_soln(sol_res)
 
     #GLMakie.activate!()
     import CairoMakie 

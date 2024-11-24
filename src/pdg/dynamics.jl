@@ -226,7 +226,7 @@ function make_vehicle(;
     Symbolics.@variables aero_moment(t) aero_torque(t)[1:3] torque(t)[1:3] aero_force(t)[1:3] Cdfs(t) Clfs(t) net_torque(t)[1:3]
     Symbolics.@variables lift_dir(t)[1:3] local_wind_vec(t)[1:3] alpha(t) accel(t)[1:3]
     Symbolics.@variables fin_force(t)[1:4, 1:3] fin1_force(t)[1:3] fin2_force(t)[1:3] fin3_force(t)[1:3] fin4_force(t)[1:3] τc(t) ρᵣ(t)
-    Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3] vel_dir(t)[1:3]
+    Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3] vel_dir(t)[1:3] q(t)
     Symbolics.@variables ua(t)[1:2] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
     Symbolics.@variables τc(t) acc(t)[1:3] centrifugal_accel(t)[1:3] coriolis_accel(t)[1:3] g_accel(t)[1:3] earth_equiv_alt(t)
     @parameters τa [tunable = true, dilation=true] τp [tunable=true, dilation=true]
@@ -249,6 +249,7 @@ function make_vehicle(;
         alpha1 ~ angle_in_plane(vel_dir, rquat(Rp) * [0,0,-1], lift_dir2);
         alpha2 ~ angle_in_plane(vel_dir, rquat(Rp) * [0,0,-1], lift_dir1);
         ρᵣ ~ ρ_kg_m³_fwd(p_Pa_fwd(earth_equiv_alt), T₀_K)/ρ₀
+        q ~ 0.5 * ρᵣ * ρ₀ * Symbolics.scalarize(sum(vp .^ 2))
 
         Cd ~ body_drag_lookup(mach, alpha)
         Cl ~ body_lift_lookup(mach, alpha)

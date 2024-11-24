@@ -315,7 +315,7 @@ function trajopt(
         ])
 end
 
-function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0)
+function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0, tol=1e-5)
     ic = prb[:ic]
     tsys = prb[:tsys]
     l, y = prb[:avars]
@@ -389,7 +389,7 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0)
         @variable(model, L)
 
         trv = [reshape(δx, :); reshape(δu, :)] .* [reshape(δx, :); reshape(δu, :)]
-        objective_expr = wₘ*μ + 0.5*sum(trv)*r + 0.5*sum(wfin.*wfin)*100*wₘ + 0.5*100*sum(wl .* wl) +wₙ*ν + L
+        objective_expr = wₘ*μ + 0.5*sum(trv)*r + 0.5*sum(wfin.*wfin)*100*wₘ + 0.5*1000*sum(wl .* wl) +wₙ*ν + L
         cvx_cst_est = () -> 0.0
         nonlin_cst = (_) -> 0.0
         if !isnothing(convex_cstr_fun)
@@ -446,7 +446,7 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0)
             continue # reject the step
         end
         
-        if maximum(abs.(xref .- xref_candidate)) < 1e-5 && maximum(abs.(uref .- uref_candidate)) < 1e-5
+        if maximum(abs.(xref .- xref_candidate)) < tol && maximum(abs.(uref .- uref_candidate)) < tol
             println("DONE < tol")
             push!(uhist, uref)
             push!(xhist, xref)

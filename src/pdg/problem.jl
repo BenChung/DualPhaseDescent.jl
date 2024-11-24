@@ -15,6 +15,12 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
     @parameters gimbal_angle=10.5, [tunable=false, description="Gimbal angle off of centerline; degrees"]
     @parameters obj_weight_fuel=1.0, [tunable=false, description="Objective weight on fuel"]
     @parameters obj_weight_time=0.0, [tunable=false, description="Objective weight on time"]
+    @parameters sωmax=1.0, [tunable=false, description="Maximum pitch rate constraint violation scale"]
+    @parameters ωmax=20.0, [tunable=false, description="Maximum pitch rate (deg/s)"]
+    @parameters sqmax=1e-5, [tunable=false, description="Maximum aerodynamic pressure constraint violation scale"]
+    @parameters qmax=100000, [tunable=false, description="Maximum dynamic pressure Pa"]
+    @parameters sqαmax=1e-5, [tunable=false, description="Maximum aerodynamic pressure constraint violation scale"]
+    @parameters qαmax=1e6, [tunable=false, description="Maximum aoa dynamic pressure product deg Pa"]
     @named paramsys = ODESystem(Equation[], t, [], [thmin, sfins, sth, gimbal_angle, obj_weight_fuel, obj_weight_time])
     return trajopt(extend(probsys, paramsys), (0.0, 1.0), 41, 
         Dict([
@@ -39,13 +45,21 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
         probsys.veh.ω => sol(0.0, idxs=solsys.veh.ω)
         ], 
         obj_weight_time*probsys.veh.τc + obj_weight_fuel*sqrt_smooth(Symbolics.scalarize(sum(probsys.veh.u .^ 2))), 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
-        max(tanh(Symbolics.scalarize(norm(probsys.veh.v))) * (probsys.veh.alpha - 25.0), 0.0) +
+        max(probsys.veh.alpha - Symbolics.scalarize(25.0/tanh(norm(probsys.veh.v) + 1e-5)), 0.0) +
+        #max(probsys.veh.alpha - Symbolics.scalarize(qαmax/(probsys.veh.q + 1e-5)), 0.0) +
         #norm(probsys.veh.ρv .* probsys.veh.v) * probsys.veh.alpha + 
         sth*ifelse(t>0.5, max(thmin^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0) + 
         sfins*lim_viol1(probsys.veh.ua[1], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2) + 
-        sfins*lim_viol2(probsys.veh.ua[2], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2), 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
+        sfins*lim_viol2(probsys.veh.ua[2], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2) +
+        sωmax*max(deg2rad(ωmax)^2 - Symbolics.scalarize(sum(probsys.veh.ω .^2)), 0) +
+        sqmax*max(probsys.veh.q - qmax, 0) + 
+        sqαmax*max(probsys.veh.q * probsys.veh.alpha - qαmax, 0) 
+        , 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
         Symbolics.scalarize(sum((probsys.veh.pos .* pos_scale/100).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2)),
         (tsys) -> begin 
+            get_pos = getu(tsys, tsys.model.veh.pos)
+            get_omega = getu(tsys, tsys.model.veh.ω)
+            get_omega_max = getp(tsys, tsys.ωmax)
             get_x = getp(tsys, tsys.model.inputx.vals)
             get_y = getp(tsys, tsys.model.inputy.vals)
             get_z = getp(tsys, tsys.model.inputz.vals)
@@ -58,7 +72,7 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
                 gimbal_angle = get_gimbal(symbolic_params)
                 for (x,y,z) in Iterators.zip(x_ctrl, y_ctrl, z_ctrl)
                     # 10.5 degree tvc
-                    @constraint(model, [z * tand(gimbal_angle/2), x, y] in SecondOrderCone())
+                    @constraint(model, [z * tand(gimbal_angle), x, y] in SecondOrderCone())
                     # max throttle
                     @constraint(model, [1.0, x, y, z] in SecondOrderCone())
                 end

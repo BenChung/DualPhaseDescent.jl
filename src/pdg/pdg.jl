@@ -9,8 +9,6 @@ using StatsBase
 probsys = build_example_problem()
 ssys = structural_simplify(probsys)
 
-tf_max = 15.0
-tf_min = 0.25
 pos_init = [500.0,40000.0,40000.0]
 vel_init = [0,-750,-500]
 R_init = [-deg2rad(atand(750,500)),0]
@@ -46,8 +44,24 @@ prob = ODEProblem(ssys, [
 sol = solve(prob, Tsit5(); dtmax=0.0001)
 
 prb = descentproblem(probsys, sol, ssys);
+
+setp(prb[:tsys], prb[:tsys].obj_weight_fuel)(prb[:pars], 1.0)
+setp(prb[:tsys], prb[:tsys].obj_weight_time)(prb[:pars], 0.0)
+setp(prb[:tsys], prb[:tsys].obj_weight_fuel)(prb[:pars], 0.0)
+setp(prb[:tsys], prb[:tsys].obj_weight_time)(prb[:pars], 0.05)
+
+#disable omegamax for now
+#setp(prb[:tsys], prb[:tsys].ωmax)(prb[:pars], 20.0)
+setp(prb[:tsys], prb[:tsys].sωmax)(prb[:pars], 0.0)
+
+
+setp(prb[:tsys], prb[:tsys].thmin)(prb[:pars], 0.5)
+setp(prb[:tsys], prb[:tsys].sqmax)(prb[:pars], 0)
+setp(prb[:tsys], prb[:tsys].sqαmax)(prb[:pars], 0)
+setp(prb[:tsys], prb[:tsys].qαmax)(prb[:pars], 5e5)
+
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100);
+u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100, tol=1e-5);
 
 ignst = x[end][:,21]
 ignpt = ignst[11:13]
@@ -191,19 +205,25 @@ end
     scatter!(Point3.(pushed))
     scatter!(Point3.([xp[end][end-2:end,21]]), color=:red)
 
+    
 sol_res = propagate_sol(ssys, u)
 sol_res = propagate_sol(ssys, up)
-plot_soln(sol_res)
+f = plot_soln(sol_res)
+
+save("sim.pdf", f; backend=CairoMakie, size=(1200,900))
 
     #GLMakie.activate!()
-    import CairoMakie 
+    using CairoMakie 
     CairoMakie.activate!()
 
 using GLMakie
 function plot_soln(sol_res)
+
+    unpowered_style = :dot 
+    powered_style = :solid
     
     retimer(t) = 10*(min(t, 0.5) * sol_res.ps[ssys.veh.τa] + max(t - 0.5, 0) * sol_res.ps[ssys.veh.τp])
-    f=Figure(size=(1400,900))
+    f=Makie.Figure(size=(1400,900),figure_padding=50)
     a=Axis3(f[1:3,1], aspect=:data, azimuth = -0.65π, xlabel="N (m)", ylabel="E (m)", zlabel="U (m)")
     Makie.lines!(a,Point3.(sol_res(LinRange(0.0,0.5,500), idxs = ssys.veh.posp).u))
     Makie.lines!(a,Point3.(sol_res(LinRange(0.5,1.0,500), idxs = ssys.veh.posp).u))
@@ -227,16 +247,16 @@ function plot_soln(sol_res)
         Makie.lines!(a, [rp[1], rp[2]], color=:red)
     end
 
-    b1 = Makie.Axis(f[1, 2], title="Position")
-    b2 = Makie.Axis(f[1, 2], yaxisposition = :right)
+    b1 = Makie.Axis(f[2, 2], title="N Position (m)")
+    b2 = Makie.Axis(f[1, 2], title="E/U Position (m)")
     unpowered_pos = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.posp)
     powered_pos = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.posp)
-    zm = Makie.lines!(b1, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 1), label="N(m)", color=:red)
-    xm = Makie.lines!(b2, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 2), label="E(m)", color=:green)
-    ym = Makie.lines!(b2, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 3), label="U(m)", color=:blue)
-    zam = Makie.lines!(b1, retimer.(powered_pos.t), getindex.(powered_pos.u, 1), label="N(m)", color=:red, linestyle=:dot)
-    xam = Makie.lines!(b2, retimer.(powered_pos.t), getindex.(powered_pos.u, 2), label="E(m)", color=:green, linestyle=:dot)
-    yam = Makie.lines!(b2, retimer.(powered_pos.t), getindex.(powered_pos.u, 3), label="U(m)", color=:blue, linestyle=:dot)
+    zm = Makie.lines!(b1, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 1), label="N(m)", color=:red, linestyle=unpowered_style)
+    xm = Makie.lines!(b2, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 2), label="E(m)", color=:green, linestyle=unpowered_style)
+    ym = Makie.lines!(b2, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 3), label="U(m)", color=:blue, linestyle=unpowered_style)
+    zam = Makie.lines!(b1, retimer.(powered_pos.t), getindex.(powered_pos.u, 1), label="N(m)", color=:red, linestyle=powered_style)
+    xam = Makie.lines!(b2, retimer.(powered_pos.t), getindex.(powered_pos.u, 2), label="E(m)", color=:green, linestyle=powered_style)
+    yam = Makie.lines!(b2, retimer.(powered_pos.t), getindex.(powered_pos.u, 3), label="U(m)", color=:blue, linestyle=powered_style)
     Legend(f[1,2], [zm, xm, ym], ["N(m)", "E(m)", "U(m)"], "Axis",
         tellheight = false,
         tellwidth = false,
@@ -244,48 +264,43 @@ function plot_soln(sol_res)
         halign = :right, 
         valign = :top)
     vi = [9, 10, 11]
-    b3 = Makie.Axis(f[2, 2], title="U Velocity (m/s)")
-    b4 = Makie.Axis(f[3, 2], title="N-E Velocity (m/s)", xlabel="Time (s)")
+    b3 = Makie.Axis(f[3, 2], title="Velocity (m/s)")
     unpowered_vel = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.vp)
     powered_vel = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.vp)
-    zvm = Makie.lines!(b4, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 1), color=:red)
-    xvm = Makie.lines!(b4, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 2), color=:green)
-    yvm = Makie.lines!(b3, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 3), color=:blue)
-    zvam = Makie.lines!(b4, retimer.(powered_vel.t), getindex.(powered_vel.u, 1), color=:red, linestyle=:dot)
-    xvam = Makie.lines!(b4, retimer.(powered_vel.t), getindex.(powered_vel.u, 2), color=:green, linestyle=:dot)
-    yvam = Makie.lines!(b3, retimer.(powered_vel.t), getindex.(powered_vel.u, 3), color=:blue, linestyle=:dot)
+    zvm = Makie.lines!(b3, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 1), color=:red, linestyle=unpowered_style)
+    xvm = Makie.lines!(b3, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 2), color=:green, linestyle=unpowered_style)
+    yvm = Makie.lines!(b3, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 3), color=:blue, linestyle=unpowered_style)
+    zvam = Makie.lines!(b3, retimer.(powered_vel.t), getindex.(powered_vel.u, 1), color=:red, linestyle=powered_style)
+    xvam = Makie.lines!(b3, retimer.(powered_vel.t), getindex.(powered_vel.u, 2), color=:green, linestyle=powered_style)
+    yvam = Makie.lines!(b3, retimer.(powered_vel.t), getindex.(powered_vel.u, 3), color=:blue, linestyle=powered_style)
 
 
-    Legend(f[2,2], [yvam, yvm], ["powered", "aerodynamic"], "Phase",
+    Legend(f[2,2], [zm, zam], [ "aero", "powered"], "Phase",
         tellheight = false,
         tellwidth = false,
         margin = (5,5,5,5),
         halign = :left, 
-        valign = :top)
+        valign = :bottom)
 
     b5 = Makie.Axis(f[1, 3], title="AoA (°)", limits=(nothing, (0.0,30.0)))
     aoa_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.alpha)
     aoa_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.alpha)
-    Makie.lines!(b5, retimer.(unpowered_vel.t), aoa_unpowered.u, color="#56B4E9")
-    Makie.lines!(b5, retimer.(powered_vel.t), aoa_powered.u, color="#56B4E9",linestyle=:dot)
+    aoa_lim = sol_res(LinRange(0.0,1.0,200), idxs=1/tanh(Symbolics.scalarize(norm(ssys.veh.v)) + 1e-5) * (25.0))
+    Makie.lines!(b5, retimer.(unpowered_vel.t), aoa_unpowered.u, color="#56B4E9", linestyle=unpowered_style)
+    Makie.lines!(b5, retimer.(powered_vel.t), aoa_powered.u, color="#56B4E9",linestyle=powered_style)
+    Makie.lines!(b5, retimer.(aoa_lim.t), aoa_lim.u, color=:red,linestyle=:dash)
 
-    b5 = Makie.Axis(f[2, 3], title="AoA 1/2 (°)", limits=(nothing, (-30.0,30.0)))
-    α1_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.alpha1)
-    α1_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.alpha1)
-    Makie.lines!(b5, retimer.(unpowered_vel.t), α1_unpowered.u, color="#E956B4")
-    Makie.lines!(b5, retimer.(powered_vel.t), α1_powered.u, color="#E956B4",linestyle=:dot)
-    α2_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.alpha2)
-    α2_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.alpha2)
-    Makie.lines!(b5, retimer.(unpowered_vel.t), α2_unpowered.u, color="#B4E956")
-    Makie.lines!(b5, retimer.(powered_vel.t), α2_powered.u, color="#B4E956",linestyle=:dot)
+    b5 = Makie.Axis(f[2, 3], title="Dynamic Pressure (Pa)")
+    q_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.q)
+    q_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.q)
+    Makie.lines!(b5, retimer.(unpowered_vel.t), q_unpowered.u, color="#E956B4", linestyle=unpowered_style)
+    Makie.lines!(b5, retimer.(powered_vel.t), q_powered.u, color="#E956B4",linestyle=powered_style)
 
-    b6 = Makie.Axis(f[3, 3], title="Omega (°/s)", xlabel="Time (s)")
-    ω_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.ω)
-    ω_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.ω)
-    zvm = Makie.lines!(b6, retimer.(unpowered_vel.t), rad2deg.(getindex.(ω_unpowered.u, 1)), color=:red)
-    xvm = Makie.lines!(b6, retimer.(unpowered_vel.t), rad2deg.(getindex.(ω_unpowered.u, 2)), color=:green)
-    zvam = Makie.lines!(b6, retimer.(powered_vel.t), rad2deg.(getindex.(ω_powered.u, 1)), color=:red, linestyle=:dot)
-    xvam = Makie.lines!(b6, retimer.(powered_vel.t), rad2deg.(getindex.(ω_powered.u, 2)), color=:green, linestyle=:dot)
+    b6 = Makie.Axis(f[3, 3], title="|ω| (°/s)", xlabel="Time (s)")
+    ω_unpowered = sol_res(LinRange(0.0,0.5,10000), idxs=ssys.veh.ω)
+    ω_powered = sol_res(LinRange(0.5,1.0,10000), idxs=ssys.veh.ω)
+    zvm = Makie.lines!(b6, retimer.(ω_unpowered.t), rad2deg.(norm.(ω_unpowered.u)), color=:blue, linestyle=unpowered_style)
+    zvam = Makie.lines!(b6, retimer.(ω_powered.t), rad2deg.(norm.(ω_powered.u)), linestyle=powered_style, color=:blue)
 
     b7 = Makie.Axis(f[1, 4], title="Lift command")
     ua_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.ua)
@@ -305,27 +320,21 @@ function plot_soln(sol_res)
     Makie.lines!(b7, retimer.(atref), collect(ulim2), color=:green, linestyle=:dash)
     Makie.lines!(b7, retimer.(atref), collect((-).(llim2)), color=:green, linestyle=:dash)
 
-    b8 = Makie.Axis(f[2, 4], title="Fin forces (Wind, N)")
-    clf_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=1000*ssys.veh.ρᵣ*ssys.veh.aero_ctrl_lift)
-    clf_powered = sol_res(LinRange(0.5,1.0,100), idxs=1000*ssys.veh.ρᵣ*ssys.veh.aero_ctrl_lift)
-    cdf_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=1000*ssys.veh.ρᵣ*ssys.veh.aero_ctrl_drag)
-    cdf_powered = sol_res(LinRange(0.5,1.0,100), idxs=1000*ssys.veh.ρᵣ*ssys.veh.aero_ctrl_drag)
-    zvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(clf_unpowered.u, 1), color=:red)
-    xvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(clf_unpowered.u, 2), color=:green)
-    xvm = Makie.lines!(b8, retimer.(unpowered_vel.t), cdf_unpowered.u, color=:blue)
-    zvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(clf_powered.u, 1), color=:red, linestyle=:dot)
-    xvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(clf_powered.u, 2), color=:green, linestyle=:dot)
-    xvm = Makie.lines!(b8, retimer.(powered_vel.t), cdf_powered.u, color=:blue, linestyle=:dot)
+    b8 = Makie.Axis(f[2, 4], title="Aero acceleration (Wind, m/s)")
+    caf_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.aero_force/ssys.veh.mp)
+    caf_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.aero_force/ssys.veh.mp)
+    zvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(caf_unpowered.u, 1), color=:red, linestyle=unpowered_style)
+    xvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(caf_unpowered.u, 2), color=:green, linestyle=unpowered_style)
+    xvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(caf_unpowered.u, 3), color=:blue, linestyle=unpowered_style)
+    zvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(caf_powered.u, 1), color=:red, linestyle=powered_style)
+    xvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(caf_powered.u, 2), color=:green, linestyle=powered_style)
+    xvm = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(caf_powered.u, 3), color=:blue, linestyle=powered_style)
 
-    b8 = Makie.Axis(f[3, 4], title="Aerodynamic body forces (Wind, N)", xlabel="Time (s)")
-    cbf_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.aero_force .- ssys.veh.ρᵣ *ssys.veh.aero_ctrl_force)
-    cbf_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.aero_force .- ssys.veh.ρᵣ *ssys.veh.aero_ctrl_force)
-    zvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(cbf_unpowered.u, 1), color=:red)
-    xvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(cbf_unpowered.u, 2), color=:green)
-    yvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(cbf_unpowered.u, 3), color=:blue)
-    zvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(cbf_powered.u, 1), color=:red, linestyle=:dot)
-    xvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(cbf_powered.u, 2), color=:green, linestyle=:dot)
-    yvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(cbf_powered.u, 3), color=:blue, linestyle=:dot)
+    b8 = Makie.Axis(f[3, 4], title="qα (Pa°)", xlabel="Time (s)")
+    qα_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.q * ssys.veh.alpha)
+    qα_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.q * ssys.veh.alpha)
+    zvm = Makie.lines!(b8, retimer.(unpowered_vel.t), qα_unpowered.u, color=:red, linestyle=unpowered_style)
+    zvam = Makie.lines!(b8, retimer.(powered_vel.t), qα_powered.u, color=:red, linestyle=powered_style)
 
     b9 = Makie.Axis(f[1, 5], title="Norm thrust (% of max)", limits=(nothing, (0.0,1.2)))
     u_powered = sol_res(LinRange(0.5,1.0,100), idxs=Symbolics.scalarize(norm(ssys.veh.u)))

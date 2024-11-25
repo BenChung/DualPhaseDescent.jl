@@ -9,9 +9,9 @@ using StatsBase
 probsys = build_example_problem()
 ssys = structural_simplify(probsys)
 
-pos_init = [500.0,40000.0,40000.0]
-vel_init = [0,-750,-500]
-R_init = [-deg2rad(atand(750,500)),0]
+pos_init = [500.0,2500.0,15000.0]
+vel_init = [0,-150,-350]
+R_init = [-deg2rad(atand(100,350)),0]
 ω_init = [0,0]
 m_init = 19516.0
 
@@ -31,8 +31,8 @@ prob = ODEProblem(ssys, [
     ssys.veh.R => R_init ./ R_scale
     ssys.veh.pos => pos_init ./ pos_scale
     ssys.veh.v => vel_init ./ vel_scale
-    ssys.veh.τa => 120.0/10
-    ssys.veh.τp => 20.0/10
+    ssys.veh.τa => 40.0/10
+    ssys.veh.τp => 40.0/10
 ], (0.0, 1.0), [
     ssys.veh.ρv => vel_scale
     ssys.veh.ρpos => pos_scale
@@ -45,48 +45,37 @@ sol = solve(prob, Tsit5(); dtmax=0.0001)
 
 prb = descentproblem(probsys, sol, ssys);
 
+default_iguess(prb)
+
 setp(prb[:tsys], prb[:tsys].obj_weight_fuel)(prb[:pars], 1.0)
 setp(prb[:tsys], prb[:tsys].obj_weight_time)(prb[:pars], 0.0)
+setp(prb[:tsys], prb[:tsys].obj_weight_ω)(prb[:pars], 0.1)
+
 setp(prb[:tsys], prb[:tsys].obj_weight_fuel)(prb[:pars], 0.0)
 setp(prb[:tsys], prb[:tsys].obj_weight_time)(prb[:pars], 0.05)
 
 #disable omegamax for now
-#setp(prb[:tsys], prb[:tsys].ωmax)(prb[:pars], 20.0)
-setp(prb[:tsys], prb[:tsys].sωmax)(prb[:pars], 0.0)
+setp(prb[:tsys], prb[:tsys].ωmax)(prb[:pars], 10.0)
+setp(prb[:tsys], prb[:tsys].sωmax)(prb[:pars], 1e-1)
 
 
+setp(prb[:tsys], prb[:tsys].sth)(prb[:pars], 100.0)
 setp(prb[:tsys], prb[:tsys].thmin)(prb[:pars], 0.5)
-setp(prb[:tsys], prb[:tsys].sqmax)(prb[:pars], 0)
-setp(prb[:tsys], prb[:tsys].sqαmax)(prb[:pars], 0)
-setp(prb[:tsys], prb[:tsys].qαmax)(prb[:pars], 5e5)
+setp(prb[:tsys], prb[:tsys].sqmax)(prb[:pars], 5e-4)
+setp(prb[:tsys], prb[:tsys].sqαmax)(prb[:pars], 1e-6)
+setp(prb[:tsys], prb[:tsys].qmax)(prb[:pars], 1e6) # 80kPa, from real Falcon trajes
+setp(prb[:tsys], prb[:tsys].qαmax)(prb[:pars], atand(500/300) * 8e5) # atand(500/300) * 80kPa, from FAR
 
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100, tol=1e-5);
+u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100,tol=1e-5,r=64);
+
 
 ignst = x[end][:,21]
-ignpt = ignst[11:13]
+get_pos = getu(prb[:tsys], prb[:tsys].model.veh.pos)
+ignpt = get_pos(ignst)
 pushdir = [1.0, 0.0, 0.0]
 
-prob_ws = ODEProblem(ssys, [
-    ssys.veh.m => m_init / m_scale
-    ssys.veh.ω => ω_init
-    ssys.veh.R => R_init
-    ssys.veh.pos => pos_init ./ pos_scale
-    ssys.veh.v => vel_init ./ vel_scale
-], (0.0, 1.0), [
-    ssys.veh.ρv => vel_scale;
-    ssys.veh.ρpos => pos_scale;
-    ssys.veh.ρm => m_scale;
-    denamespace.((ssys, ), tp) .=> [
-        u[end][1], #10*u[end][1], 
-        u[end][2], 
-        u[end][3:22], 
-        u[end][23:42], 
-        u[end][43:62], 
-        u[end][63:82], 
-        u[end][83:102]]
-])
-sol_ws = solve(prob_ws, Tsit5(); dtmax=0.001)
+sol_ws = propagate_sol(ssys, u)
 
 
 prb_divert = descentproblem(probsys, sol_ws, ssys;
@@ -114,7 +103,7 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
             end
             function postsolve(model)
             end
-            return objexp + 100000*sum(wc.*wc) - 100*dot(get_pos(δx[:, 21] .+ xref[:, 21]) - ignpt, push_dir), cvx_cst_est, nonlin_cst, postsolve
+            return objexp + 1000*sum(wc.*wc) - 100*dot(get_pos(δx[:, 21] .+ xref[:, 21]) - ignpt, push_dir), cvx_cst_est, nonlin_cst, postsolve
         end
     end,
     custsys=(sys,l,y) -> begin 
@@ -158,56 +147,67 @@ end
     upd_ignpt = setp(prb_divert[:tsys], prb_divert[:tsys].ignpt)
     upd_fuel_wt = setp(prb_divert[:tsys], prb_divert[:tsys].obj_weight_fuel)
 
-    upd_pushdir(prb_divert[:pars], [0.0,0.0,1.0])
+    upd_pushdir(prb_divert[:pars], [-1.0,0.0,0.0])
     upd_ignpt(prb_divert[:pars], ignpt)
     upd_fuel_wt(prb_divert[:pars], 0.0)
+    setp(prb_divert[:tsys], prb_divert[:tsys].obj_weight_time)(prb_divert[:pars], 0.0)
+    setp(prb_divert[:tsys], prb_divert[:tsys].obj_weight_ω)(prb_divert[:pars], 0.0)
     
     ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
     up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
 
     dirs = []
-    pushed = Vector{Float64}[]
+    pushed = Pair{Vector{Float64}, Vector{Float64}}[]
 
     rejected = 0
     errors = 0
     ph = nothing
-    for i=1:1000
+    for i=1:10
         println("====== $i $i $i $i $i ======")
         dir_rand = rand(3) - [0.5, 0.5, 0.5]
         dir_rand = dir_rand/norm(dir_rand)
         upd_pushdir(prb_divert[:pars], dir_rand)
+        control_guess = nothing
         upd_ignpt(prb_divert[:pars], if !isempty(pushed) && length(pushed) > 4
-            ph = quickhull(convert(Vector{Vector{Float64}}, pushed))
-            sample(ph.pts)
+            ph = quickhull(convert(Vector{Vector{Float64}}, first.(pushed)))
+            result = sample(ph.pts)
+            control_guess = last(pushed[findfirst(pr -> pr[1] ≈ result, pushed)])
+            result
         else 
+            control_guess = u[end]
             ignpt
         end)
         try
-            up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
-            propagated = propagate_sol(up)
+            up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16, 
+                initfun=(prb) -> default_iguess(prb; control_guess=control_guess));
+            propagated = propagate_sol(ssys, up)
             if norm(propagated[ssys.veh.pos .* ssys.veh.ρpos][end]) > 20 || maximum(abs.(wh[end])) > 1e-3
                 println("SOLN REJECT > tol")
                 rejected += 1
                 continue 
             end
             
-            push!(pushed, xp[end][11:13,21])
+            push!(pushed, get_pos(xp[end][:,21]) => up[end])
             push!(dirs, dir_rand)
         catch e 
+            rethrow(e)
             println("caught error, continuing")
             errors += 1
         end
     end
-    ph = quickhull(convert(Vector{Vector{Float64}}, pushed))
-    using GLMakie
-    Makie.lines(Point3.(sol_ws[ssys.veh.pos]))
-    Makie.wireframe!(GeometryBasics.Mesh(GeometryBasics.Point3.(ph.pts), facets(ph)), color=:blue)
+    ph = quickhull(convert(Vector{Vector{Float64}}, first.(pushed)))
+    import GLMakie
+    GLMakie.activate!()
+    f = Figure()
+    ax = Axis3(f[1,1], aspect=:data)
+    Makie.lines!(ax,Point3.(sol_ws[ssys.veh.pos]))
+    Makie.wireframe!(ax,GeometryBasics.Mesh(GeometryBasics.Point3.(ph.pts), facets(ph)), color=:blue)
     scatter!(Point3.(pushed))
     scatter!(Point3.([xp[end][end-2:end,21]]), color=:red)
 
     
 sol_res = propagate_sol(ssys, u)
-sol_res = propagate_sol(ssys, up)
+sol_res = propagate_sol(ssys, [last(pushed[end-1])])
 f = plot_soln(sol_res)
 
 save("sim.pdf", f; backend=CairoMakie, size=(1200,900))
@@ -296,7 +296,7 @@ function plot_soln(sol_res)
     Makie.lines!(b5, retimer.(unpowered_vel.t), q_unpowered.u, color="#E956B4", linestyle=unpowered_style)
     Makie.lines!(b5, retimer.(powered_vel.t), q_powered.u, color="#E956B4",linestyle=powered_style)
 
-    b6 = Makie.Axis(f[3, 3], title="|ω| (°/s)", xlabel="Time (s)")
+    b6 = Makie.Axis(f[3, 3], title="||ω||₂ (°/s)", xlabel="Time (s)")
     ω_unpowered = sol_res(LinRange(0.0,0.5,10000), idxs=ssys.veh.ω)
     ω_powered = sol_res(LinRange(0.5,1.0,10000), idxs=ssys.veh.ω)
     zvm = Makie.lines!(b6, retimer.(ω_unpowered.t), rad2deg.(norm.(ω_unpowered.u)), color=:blue, linestyle=unpowered_style)
@@ -320,7 +320,7 @@ function plot_soln(sol_res)
     Makie.lines!(b7, retimer.(atref), collect(ulim2), color=:green, linestyle=:dash)
     Makie.lines!(b7, retimer.(atref), collect((-).(llim2)), color=:green, linestyle=:dash)
 
-    b8 = Makie.Axis(f[2, 4], title="Aero acceleration (Wind, m/s)")
+    b8 = Makie.Axis(f[2, 4], title="Aero acceleration (Inertial, m/s^2)")
     caf_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.aero_force/ssys.veh.mp)
     caf_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.aero_force/ssys.veh.mp)
     zvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(caf_unpowered.u, 1), color=:red, linestyle=unpowered_style)

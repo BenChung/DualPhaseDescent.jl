@@ -173,21 +173,22 @@ end
 function trajopt(
     sys, tspan, N, given_params, initial_guess,
     ic, running_cost, terminal_cost, 
-    g, h, Ph,
+    gs::Vector, #h, 
+    Ph,
     convex_mod=nothing, problem_mod=nothing
 )
-@show g h Ph
-@show terminal_cost
     t = sys.iv
     (ti, tf) = tspan
     dtime = tf - ti
+    ng = length(gs)
+    @show ng
     augmenting_vars = ModelingToolkit.@variables begin
         l(t)=0
-        y(t)=0
+        y(t)[1:ng]=0
     end
     eqs = [
-        D(l) ~ running_cost,
-        D(y) ~ sum((max.(0.0, g)) .^ 2) + sum(h .^ 2)
+        D(l) ~ running_cost;
+        Symbolics.scalarize(D.(y) .~ gs) # sum((max.(0.0, g)) .^ 2) + sum(h .^ 2)
     ]
     @show running_cost
     augmented_system = ODESystem(eqs, t, systems=[sys], name=:augmented_system)
@@ -213,7 +214,7 @@ function trajopt(
     upd_cost = setu(tsys, tsys.l)
 
     iguess = ModelingToolkit.varmap_to_vars(initial_guess, unknowns(tsys); defaults=Dict(unknowns(tsys) .=> (zeros(N), )), promotetoconcrete=false)
-    @show iguess unknowns(tsys) initial_guess
+    # iguess unknowns(tsys) initial_guess
     iguess = collect(reduce(hcat, iguess)')
     base_prob = ODEProblem(tsys, unknowns(tsys) .=> iguess[:, 1], (0.0, 1.0), given_params; dtmax = 0.01)
     nunk = length(unknowns(tsys))
@@ -311,11 +312,31 @@ function trajopt(
         :convex_mod => convex_mod,
         :pars => params,
         :jac_sparsity => sparsity_pattern,
-        :colorvec => colorvec
+        :colorvec => colorvec,
+        :base_prob => base_prob,
+        :ng => ng
         ])
 end
 
-function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0, tol=1e-5)
+function default_iguess(prb; control_guess = nothing)
+    base_prob = prb[:base_prob]
+    N = prb[:N]
+    tsys = prb[:tsys]
+    if isnothing(control_guess)
+        params = prb[:pars]
+        prob = remake(base_prob, p=params)
+    else
+        params = prb[:pars]
+        _, repack, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
+        prob = remake(base_prob, p=repack(control_guess))
+    end
+    sol = solve(prob, Tsit5())
+    ts = LinRange(0.0,1.0,N)
+    steps = sol(ts, idxs=unknowns(tsys))
+    return stack(steps)
+end
+
+function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wᵥ=1000, r = 8.0, tol=1e-5)
     ic = prb[:ic]
     tsys = prb[:tsys]
     l, y = prb[:avars]
@@ -328,10 +349,11 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0, to
     dil = prb[:dil]
     nunk = length(unknowns(tsys))
     params = prb[:pars]
+    ng = prb[:ng]
 
 
-    tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0, y => 0.0]))
-    xref = iguess
+    tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0; Symbolics.scalarize(y .=> 0.0)]))
+    xref = initfun(prb)
     uref = tunable
     uhist = []
     xhist = []
@@ -345,6 +367,7 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0, to
     #return res
     rd = collect(res.derivs[1]) # res gets clobbered for some reason by linearize?
     rv = collect(res.value)
+    get_y = getu(tsys, tsys.y)
 
     if !isnothing(convex_mod)
         convex_cstr_fun = convex_mod(tsys)
@@ -368,8 +391,7 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0, to
         set_optimizer_attribute(model, "verbose", false)
         @variable(model, δx[1:nunk,1:N])
         @variable(model, w[1:nunk,1:N-1])
-        @variable(model, wfin[1:nunk])
-        @variable(model, wl[1:N])
+        @variable(model, wl[1:ng,1:N])
         @variable(model, δu[1:nparams])
         @variable(model, tc_lin)
         @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .== rd * [reshape(δx[:, 1:N], :); δu] .+ rv .- [reshape(xref[:, 2:N], :); 0])
@@ -389,23 +411,19 @@ function do_trajopt(prb; maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, r = 8.0, to
         @variable(model, L)
 
         trv = [reshape(δx, :); reshape(δu, :)] .* [reshape(δx, :); reshape(δu, :)]
-        objective_expr = wₘ*μ + 0.5*sum(trv)*r + 0.5*sum(wfin.*wfin)*100*wₘ + 0.5*1000*sum(wl .* wl) +wₙ*ν + L
+        objective_expr = wₘ*μ + 0.5*sum(trv)*r + 0.5*wᵥ*sum(wl .* wl) +wₙ*ν + L
         cvx_cst_est = () -> 0.0
         nonlin_cst = (_) -> 0.0
         if !isnothing(convex_cstr_fun)
             symbolic_params = rmk(δu .+ uref)
             objective_expr, cvx_cst_est, nonlin_cst, postsolve = convex_cstr_fun(model, δx, xref, symbolic_params, objective_expr)
         end
-
-        @constraint(model, δx[4:5,N] .+ xref[4:5,N] .+ wfin[4:5] .== [0.0,0.0]) # omega
-        @constraint(model, δx[6:7,N] .+ xref[6:7,N] .+ wfin[6:7] .== [0.0,0.0]) # R
-        #@constraint(model, δx[11:13,N] .+ xref[11:13,N] .== [0.0,0.0,0.0]) # v
-        @constraint(model, δx[8:10,N] .+ xref[8:10,N] .+ wfin[8:10] .== [0.0,0.0,0.0]) # v[1:2]
-        @constraint(model, δx[11:13,N] .+ xref[11:13,N] .+ wfin[11:13] .== [0.0,0,0.0]) # pos
         
         @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
-                
-        @constraint(model, δx[2,:] .+ xref[2,:] .+ wl .== 0)
+        
+        for i=1:N
+            @constraint(model, get_y(δx[:,i] .+ xref[:,i]) .+ wl[:,i] .== 0)
+        end
         
         #=
         @variable(model, ηₙ) # terminal constraint trust region

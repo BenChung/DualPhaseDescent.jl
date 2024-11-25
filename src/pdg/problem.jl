@@ -15,11 +15,12 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
     @parameters gimbal_angle=10.5, [tunable=false, description="Gimbal angle off of centerline; degrees"]
     @parameters obj_weight_fuel=1.0, [tunable=false, description="Objective weight on fuel"]
     @parameters obj_weight_time=0.0, [tunable=false, description="Objective weight on time"]
-    @parameters sωmax=1.0, [tunable=false, description="Maximum pitch rate constraint violation scale"]
+    @parameters obj_weight_ω=0.0, [tunable=false, description="Objective weight on angular rate"]
+    @parameters sωmax=0, [tunable=false, description="Maximum pitch rate constraint violation scale"]
     @parameters ωmax=20.0, [tunable=false, description="Maximum pitch rate (deg/s)"]
-    @parameters sqmax=1e-5, [tunable=false, description="Maximum aerodynamic pressure constraint violation scale"]
+    @parameters sqmax=0, [tunable=false, description="Maximum aerodynamic pressure constraint violation scale"]
     @parameters qmax=100000, [tunable=false, description="Maximum dynamic pressure Pa"]
-    @parameters sqαmax=1e-5, [tunable=false, description="Maximum aerodynamic pressure constraint violation scale"]
+    @parameters sqαmax=0, [tunable=false, description="Maximum aerodynamic pressure constraint violation scale"]
     @parameters qαmax=1e6, [tunable=false, description="Maximum aoa dynamic pressure product deg Pa"]
     @named paramsys = ODESystem(Equation[], t, [], [thmin, sfins, sth, gimbal_angle, obj_weight_fuel, obj_weight_time])
     return trajopt(extend(probsys, paramsys), (0.0, 1.0), 41, 
@@ -44,27 +45,32 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
         probsys.veh.R => sol(0.0, idxs=solsys.veh.R),
         probsys.veh.ω => sol(0.0, idxs=solsys.veh.ω)
         ], 
-        obj_weight_time*probsys.veh.τc + obj_weight_fuel*sqrt_smooth(Symbolics.scalarize(sum(probsys.veh.u .^ 2))), 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
-        max(probsys.veh.alpha - Symbolics.scalarize(25.0/tanh(norm(probsys.veh.v) + 1e-5)), 0.0) +
-        #max(probsys.veh.alpha - Symbolics.scalarize(qαmax/(probsys.veh.q + 1e-5)), 0.0) +
-        #norm(probsys.veh.ρv .* probsys.veh.v) * probsys.veh.alpha + 
-        sth*ifelse(t>0.5, max(thmin^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0) + 
-        sfins*lim_viol1(probsys.veh.ua[1], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2) + 
-        sfins*lim_viol2(probsys.veh.ua[2], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2) +
-        sωmax*max(deg2rad(ωmax)^2 - Symbolics.scalarize(sum(probsys.veh.ω .^2)), 0) +
-        sqmax*max(probsys.veh.q - qmax, 0) + 
-        sqαmax*max(probsys.veh.q * probsys.veh.alpha - qαmax, 0) 
-        , 0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
+        obj_weight_time*probsys.veh.τc + obj_weight_fuel*sqrt_smooth(Symbolics.scalarize(sum(probsys.veh.u .^ 2))) + obj_weight_ω * sqrt_smooth(Symbolics.scalarize(sum(probsys.veh.ω .^ 2))), 0,# -100*dot(probsys.veh.pos .* pos_scale, [1.0,0.0,0.0]), 
+        [
+            max(probsys.veh.alpha - Symbolics.scalarize(25.0/tanh(norm(probsys.veh.v) + 1e-5)), 0.0),
+            #max(probsys.veh.alpha - Symbolics.scalarize(qαmax/(probsys.veh.q + 1e-5)), 0.0) +
+            #norm(probsys.veh.ρv .* probsys.veh.v) * probsys.veh.alpha + 
+            sth*ifelse(t>0.5, max(thmin^2 - Symbolics.scalarize(sum(probsys.veh.u .^ 2)), 0.0), 0.0),
+            sfins*lim_viol1(probsys.veh.ua[1], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2),
+            sfins*lim_viol2(probsys.veh.ua[2], probsys.veh.mach, probsys.veh.alpha1, probsys.veh.alpha2),
+            sωmax*max(deg2rad(ωmax)^2 - Symbolics.scalarize(sum(probsys.veh.ω .^2)), 0),
+            max(sqmax*probsys.veh.q - sqmax*qmax, 0), 
+            sqαmax*max(probsys.veh.q * probsys.veh.alpha - qαmax, 0)
+        ], #0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
         Symbolics.scalarize(sum((probsys.veh.pos .* pos_scale/100).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2)),
         (tsys) -> begin 
             get_pos = getu(tsys, tsys.model.veh.pos)
             get_omega = getu(tsys, tsys.model.veh.ω)
+            get_v = getu(tsys, tsys.model.veh.v)
+            get_R = getu(tsys, tsys.model.veh.R)
             get_omega_max = getp(tsys, tsys.ωmax)
+            get_omega_weight = getp(tsys, tsys.sωmax)
             get_x = getp(tsys, tsys.model.inputx.vals)
             get_y = getp(tsys, tsys.model.inputy.vals)
             get_z = getp(tsys, tsys.model.inputz.vals)
             get_gimbal = getp(tsys, tsys.model.gimbal_angle)
             custfun = cvx_mod(tsys)
+            nunk = length(unknowns(tsys))
             return function (model, δx, xref, symbolic_params, objexp)
                 x_ctrl = get_x(symbolic_params)
                 y_ctrl = get_y(symbolic_params)
@@ -76,7 +82,21 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
                     # max throttle
                     @constraint(model, [1.0, x, y, z] in SecondOrderCone())
                 end
-                return custfun(model, δx, xref, symbolic_params, objexp)
+
+                symbolic_state = δx .+ xref
+                if get_omega_weight(symbolic_params) > 0.0
+                    for x in eachcol(symbolic_state)
+                        @constraint(model, [deg2rad(get_omega_max(symbolic_params)); get_omega(x)] in SecondOrderCone())
+                    end
+                end
+                @variable(model, wfin[1:nunk])
+                final_symbolic_state = symbolic_state[:,end] .+ wfin
+                @constraint(model, get_omega(final_symbolic_state) .== [0.0,0.0]) # omega
+                @constraint(model, get_R(final_symbolic_state) .== [0.0,0.0]) # R
+                @constraint(model, get_v(final_symbolic_state) .== [0.0,0.0,0.0]) # v
+                @constraint(model, get_pos(final_symbolic_state) .== [0.0,0,0.0]) # pos
+
+                return custfun(model, δx, xref, symbolic_params, objexp + 0.5*sum(wfin.*wfin)*1000000)
             end
         end, 
         (sys, l, y) -> begin 

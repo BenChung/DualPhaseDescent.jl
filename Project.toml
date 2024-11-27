@@ -4,6 +4,7 @@ authors = ["Ben Chung <ckfinite@gmail.com> and contributors"]
 version = "1.0.0-DEV"
 
 [deps]
+CDDLib = "3391f64e-dcde-5f30-b752-e11513730f60"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 Clarabel = "61c947e1-3e6d-4ee4-985a-eec8c727bd6e"
@@ -41,11 +42,14 @@ SciMLStructures = "53ae85a6-f571-4167-b2af-e1d143709226"
 Setfield = "efcf1570-3423-57d1-acb7-fd33fddbac46"
 SparseConnectivityTracer = "9f842d2f-2579-4b1d-911e-f412cf18a3f5"
 SparseDiffTools = "47a9eef4-7e08-11e9-0b38-333d64bd3804"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 SymbolicIndexingInterface = "2efcf032-c050-4f8e-a9bb-153293bab1f5"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
+TickTock = "9ff05d80-102d-5586-aa04-3a8bd1a90d20"
 
 [compat]
+CDDLib = "0.9.4"
 ComponentArrays = "0.15.19"
 GeometryBasics = "0.4.11"
 LazyArrays = "2.2.2"
@@ -53,7 +57,9 @@ MathOptInterface = "1.34.0"
 Polyhedra = "0.7.8"
 QHull = "0.2.5"
 Quickhull = "0.2.0"
+StaticArrays = "1.9.8"
 StatsBase = "0.34.3"
+TickTock = "1.3.0"
 julia = "1.10"
 
 [extras]

@@ -89,6 +89,10 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
                         @constraint(model, [deg2rad(get_omega_max(symbolic_params)); get_omega(x)] in SecondOrderCone())
                     end
                 end
+                for x in eachcol(symbolic_state)
+                    pos = get_pos(symbolic_state)
+                    @constraint(model, [tand(60)*pos[3], pos[1], pos[2]] in SecondOrderCone())
+                end
                 @variable(model, wfin[1:nunk])
                 final_symbolic_state = symbolic_state[:,end] .+ wfin
                 @constraint(model, get_omega(final_symbolic_state) .== [0.0,0.0]) # omega

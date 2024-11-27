@@ -5,6 +5,9 @@ include("problem.jl")
 using Quickhull
 using GeometryBasics
 using StatsBase
+using Printf
+using TickTock
+using Polyhedra
 
 probsys = build_example_problem()
 ssys = structural_simplify(probsys)
@@ -45,26 +48,20 @@ sol = solve(prob, Tsit5(); dtmax=0.0001)
 
 prb = descentproblem(probsys, sol, ssys);
 
-default_iguess(prb)
 
 setp(prb[:tsys], prb[:tsys].obj_weight_fuel)(prb[:pars], 1.0)
 setp(prb[:tsys], prb[:tsys].obj_weight_time)(prb[:pars], 0.0)
-setp(prb[:tsys], prb[:tsys].obj_weight_ω)(prb[:pars], 0.1)
+setp(prb[:tsys], prb[:tsys].obj_weight_ω)(prb[:pars], 0.0)
 
-setp(prb[:tsys], prb[:tsys].obj_weight_fuel)(prb[:pars], 0.0)
-setp(prb[:tsys], prb[:tsys].obj_weight_time)(prb[:pars], 0.05)
+#setp(prb[:tsys], prb[:tsys].obj_weight_fuel)(prb[:pars], 0.0)
+#setp(prb[:tsys], prb[:tsys].obj_weight_time)(prb[:pars], 0.05)
 
-#disable omegamax for now
 setp(prb[:tsys], prb[:tsys].ωmax)(prb[:pars], 10.0)
-setp(prb[:tsys], prb[:tsys].sωmax)(prb[:pars], 1e-1)
-
-
-setp(prb[:tsys], prb[:tsys].sth)(prb[:pars], 100.0)
-setp(prb[:tsys], prb[:tsys].thmin)(prb[:pars], 0.5)
+setp(prb[:tsys], prb[:tsys].sωmax)(prb[:pars], 0.1)
 setp(prb[:tsys], prb[:tsys].sqmax)(prb[:pars], 5e-4)
 setp(prb[:tsys], prb[:tsys].sqαmax)(prb[:pars], 1e-6)
-setp(prb[:tsys], prb[:tsys].qmax)(prb[:pars], 1e6) # 80kPa, from real Falcon trajes
-setp(prb[:tsys], prb[:tsys].qαmax)(prb[:pars], atand(500/300) * 8e5) # atand(500/300) * 80kPa, from FAR
+setp(prb[:tsys], prb[:tsys].qmax)(prb[:pars], 8e4) # 80kPa, from real Falcon trajes
+setp(prb[:tsys], prb[:tsys].qαmax)(prb[:pars], 1e6)
 
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
 u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100,tol=1e-5,r=64);
@@ -74,6 +71,30 @@ ignst = x[end][:,21]
 get_pos = getu(prb[:tsys], prb[:tsys].model.veh.pos)
 ignpt = get_pos(ignst)
 pushdir = [1.0, 0.0, 0.0]
+
+
+function propagate_sol(ssys, u)
+    prob_res = ODEProblem(ssys, [
+        ssys.veh.m => m_init / m_scale
+        ssys.veh.ω => ω_init
+        ssys.veh.R => R_init
+        ssys.veh.pos => pos_init ./ pos_scale
+        ssys.veh.v => vel_init ./ vel_scale
+    ], (0.0, 1.0), [
+        ssys.veh.ρv => vel_scale;
+        ssys.veh.ρpos => pos_scale;
+        ssys.veh.ρm => m_scale;
+        denamespace.((ssys, ), tp) .=> [
+            u[end][1], #10*u[end][1], 
+            u[end][2], 
+            u[end][3:22], 
+            u[end][23:42], 
+            u[end][43:62], 
+            u[end][63:82], 
+            u[end][83:102]]
+    ])
+    return solve(prob_res, Tsit5())
+end
 
 sol_ws = propagate_sol(ssys, u)
 
@@ -120,94 +141,98 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
     end
 );
 
-function propagate_sol(ssys, u)
-    prob_res = ODEProblem(ssys, [
-        ssys.veh.m => m_init / m_scale
-        ssys.veh.ω => ω_init
-        ssys.veh.R => R_init
-        ssys.veh.pos => pos_init ./ pos_scale
-        ssys.veh.v => vel_init ./ vel_scale
-    ], (0.0, 1.0), [
-        ssys.veh.ρv => vel_scale;
-        ssys.veh.ρpos => pos_scale;
-        ssys.veh.ρm => m_scale;
-        denamespace.((ssys, ), tp) .=> [
-            u[end][1], #10*u[end][1], 
-            u[end][2], 
-            u[end][3:22], 
-            u[end][23:42], 
-            u[end][43:62], 
-            u[end][63:82], 
-            u[end][83:102]]
-    ])
-    return solve(prob_res, Tsit5())
-end
 
     upd_pushdir = setp(prb_divert[:tsys], prb_divert[:tsys].push_dir)
     upd_ignpt = setp(prb_divert[:tsys], prb_divert[:tsys].ignpt)
     upd_fuel_wt = setp(prb_divert[:tsys], prb_divert[:tsys].obj_weight_fuel)
 
-    upd_pushdir(prb_divert[:pars], [-1.0,0.0,0.0])
+    upd_pushdir(prb_divert[:pars], [1.0,0.0,0.0])
     upd_ignpt(prb_divert[:pars], ignpt)
     upd_fuel_wt(prb_divert[:pars], 0.0)
     setp(prb_divert[:tsys], prb_divert[:tsys].obj_weight_time)(prb_divert[:pars], 0.0)
     setp(prb_divert[:tsys], prb_divert[:tsys].obj_weight_ω)(prb_divert[:pars], 0.0)
+
+    
+    setp(prb_divert[:tsys], prb_divert[:tsys].ωmax)(prb_divert[:pars], 10.0)
+    setp(prb_divert[:tsys], prb_divert[:tsys].sωmax)(prb_divert[:pars], 0.1)
+    setp(prb_divert[:tsys], prb_divert[:tsys].sqmax)(prb_divert[:pars], 5e-4)
+    setp(prb_divert[:tsys], prb_divert[:tsys].sqαmax)(prb_divert[:pars], 1e-6)
+    setp(prb_divert[:tsys], prb_divert[:tsys].qmax)(prb_divert[:pars], 8e4) # 80kPa, from real Falcon trajes
+    setp(prb_divert[:tsys], prb_divert[:tsys].qαmax)(prb_divert[:pars], 1e6)
     
     ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
-    up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
+    @profview up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
 
-    dirs = []
-    pushed = Pair{Vector{Float64}, Vector{Float64}}[]
+    function do_reachability_problem(prb_divert, ignpt, u, trajes=1)
+        dirs = Vector{Float64}[]
+        pushed = Pair{Vector{Float64}, Vector{Float64}}[ignpt => u[end]]
+        chhists = [rch]
+        src = [-1]
+        times = []
 
-    rejected = 0
-    errors = 0
-    ph = nothing
-    for i=1:10
-        println("====== $i $i $i $i $i ======")
-        dir_rand = rand(3) - [0.5, 0.5, 0.5]
-        dir_rand = dir_rand/norm(dir_rand)
-        upd_pushdir(prb_divert[:pars], dir_rand)
-        control_guess = nothing
-        upd_ignpt(prb_divert[:pars], if !isempty(pushed) && length(pushed) > 4
-            ph = quickhull(convert(Vector{Vector{Float64}}, first.(pushed)))
-            result = sample(ph.pts)
-            control_guess = last(pushed[findfirst(pr -> pr[1] ≈ result, pushed)])
-            result
-        else 
-            control_guess = u[end]
-            ignpt
-        end)
-        try
-            up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16, 
-                initfun=(prb) -> default_iguess(prb; control_guess=control_guess));
-            propagated = propagate_sol(ssys, up)
-            if norm(propagated[ssys.veh.pos .* ssys.veh.ρpos][end]) > 20 || maximum(abs.(wh[end])) > 1e-3
-                println("SOLN REJECT > tol")
-                rejected += 1
-                continue 
+        rejects = []
+        rejected = 0
+        errors = 0
+        ph = nothing
+        tick()
+        for i=1:trajes
+            println("====== $i $i $i $i $i ======")
+            dir_rand = rand(3) - [0.5, 0.5, 0.5]
+            dir_rand = dir_rand/norm(dir_rand)
+            upd_pushdir(prb_divert[:pars], dir_rand)
+            control_guess = nothing
+            src_ind = 0
+            upd_ignpt(prb_divert[:pars], if !isempty(pushed) && length(pushed) > 4
+                ph = quickhull(convert(Vector{Vector{Float64}}, first.(pushed)))
+                result = sample(ph.pts)
+                src_ind = findfirst(pr -> pr[1] ≈ result, pushed)
+                control_guess = last(pushed[src_ind])
+                result
+            else 
+                src_ind = 1
+                control_guess = u[end]
+                ignpt
+            end)
+            try
+                up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16, tol=1e-3,
+                    initfun=(prb) -> default_iguess(prb; control_guess=control_guess));
+                propagated = propagate_sol(ssys, up)
+                if norm(propagated[ssys.veh.posp][end]) > 20 || maximum(abs.(whp[end])) > 1e-3
+                    println("SOLN REJECT > tol")
+                    rejected += 1
+                    push!(rejects, (up[end], whp[end]))
+                    continue 
+                end
+                
+                push!(pushed, get_pos(xp[end][:,21]) => up[end])
+                push!(src, src_ind)
+                push!(chhists, rchp)
+                push!(dirs, dir_rand)
+                push!(times, peektimer())
+            catch e 
+                println("caught error, continuing")
+                errors += 1
             end
-            
-            push!(pushed, get_pos(xp[end][:,21]) => up[end])
-            push!(dirs, dir_rand)
-        catch e 
-            rethrow(e)
-            println("caught error, continuing")
-            errors += 1
         end
+        tock()
+        return rejects, pushed, src, chhists, dirs, times, errors, rejected
     end
+    rejects, pushed, src, chhists, dirs, times, errors, rejected = do_reachability_problem(prb_divert, ignpt, u, 10);
+    rejects, pushed, src, chhists, dirs, times, errors, rejected = do_reachability_problem(prb_divert, ignpt, u, 10000);
     ph = quickhull(convert(Vector{Vector{Float64}}, first.(pushed)))
-    import GLMakie
-    GLMakie.activate!()
-    f = Figure()
-    ax = Axis3(f[1,1], aspect=:data)
-    Makie.lines!(ax,Point3.(sol_ws[ssys.veh.pos]))
-    Makie.wireframe!(ax,GeometryBasics.Mesh(GeometryBasics.Point3.(ph.pts), facets(ph)), color=:blue)
-    scatter!(Point3.(pushed))
-    scatter!(Point3.([xp[end][end-2:end,21]]), color=:red)
+
+
+    using CairoMakie
+    include("trajplots.jl")
+
+    save("spbm_convplot.pdf", spbm_convplot(chhists); size=(400,400))e
+
+    save("reachable.pdf", plot_polytope(sol_ws, pushed, ph); backend=CairoMakie, size=(900,900))
+
 
     
 sol_res = propagate_sol(ssys, u)
-sol_res = propagate_sol(ssys, [last(pushed[end-1])])
+sol_res = propagate_sol(ssys, [pushed[461][2]])
 f = plot_soln(sol_res)
 
 save("sim.pdf", f; backend=CairoMakie, size=(1200,900))
@@ -217,140 +242,6 @@ save("sim.pdf", f; backend=CairoMakie, size=(1200,900))
     CairoMakie.activate!()
 
 using GLMakie
-function plot_soln(sol_res)
-
-    unpowered_style = :dot 
-    powered_style = :solid
-    
-    retimer(t) = 10*(min(t, 0.5) * sol_res.ps[ssys.veh.τa] + max(t - 0.5, 0) * sol_res.ps[ssys.veh.τp])
-    f=Makie.Figure(size=(1400,900),figure_padding=50)
-    a=Axis3(f[1:3,1], aspect=:data, azimuth = -0.65π, xlabel="N (m)", ylabel="E (m)", zlabel="U (m)")
-    Makie.lines!(a,Point3.(sol_res(LinRange(0.0,0.5,500), idxs = ssys.veh.posp).u))
-    Makie.lines!(a,Point3.(sol_res(LinRange(0.5,1.0,500), idxs = ssys.veh.posp).u))
-
-    naxes = 30
-    for rp in zip(
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp).u),
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp .+ rquat(ssys.veh.R) * [0,0,1000]).u))
-        Makie.lines!(a, [rp[1], rp[2]], color=:blue)
-    end
-
-    for rp in zip(
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp).u),
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp .+ rquat(ssys.veh.R) * [0,1000,0]).u))
-        Makie.lines!(a, [rp[1], rp[2]], color=:green)
-    end
-
-    for rp in zip(
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp).u),
-        Point3.(sol_res(LinRange(0.0,1.0,naxes), idxs = ssys.veh.posp .+ rquat(ssys.veh.R) * [1000,0,0]).u))
-        Makie.lines!(a, [rp[1], rp[2]], color=:red)
-    end
-
-    b1 = Makie.Axis(f[2, 2], title="N Position (m)")
-    b2 = Makie.Axis(f[1, 2], title="E/U Position (m)")
-    unpowered_pos = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.posp)
-    powered_pos = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.posp)
-    zm = Makie.lines!(b1, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 1), label="N(m)", color=:red, linestyle=unpowered_style)
-    xm = Makie.lines!(b2, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 2), label="E(m)", color=:green, linestyle=unpowered_style)
-    ym = Makie.lines!(b2, retimer.(unpowered_pos.t), getindex.(unpowered_pos.u, 3), label="U(m)", color=:blue, linestyle=unpowered_style)
-    zam = Makie.lines!(b1, retimer.(powered_pos.t), getindex.(powered_pos.u, 1), label="N(m)", color=:red, linestyle=powered_style)
-    xam = Makie.lines!(b2, retimer.(powered_pos.t), getindex.(powered_pos.u, 2), label="E(m)", color=:green, linestyle=powered_style)
-    yam = Makie.lines!(b2, retimer.(powered_pos.t), getindex.(powered_pos.u, 3), label="U(m)", color=:blue, linestyle=powered_style)
-    Legend(f[1,2], [zm, xm, ym], ["N(m)", "E(m)", "U(m)"], "Axis",
-        tellheight = false,
-        tellwidth = false,
-        margin = (5,5,5,5),
-        halign = :right, 
-        valign = :top)
-    vi = [9, 10, 11]
-    b3 = Makie.Axis(f[3, 2], title="Velocity (m/s)")
-    unpowered_vel = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.vp)
-    powered_vel = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.vp)
-    zvm = Makie.lines!(b3, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 1), color=:red, linestyle=unpowered_style)
-    xvm = Makie.lines!(b3, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 2), color=:green, linestyle=unpowered_style)
-    yvm = Makie.lines!(b3, retimer.(unpowered_vel.t), getindex.(unpowered_vel.u, 3), color=:blue, linestyle=unpowered_style)
-    zvam = Makie.lines!(b3, retimer.(powered_vel.t), getindex.(powered_vel.u, 1), color=:red, linestyle=powered_style)
-    xvam = Makie.lines!(b3, retimer.(powered_vel.t), getindex.(powered_vel.u, 2), color=:green, linestyle=powered_style)
-    yvam = Makie.lines!(b3, retimer.(powered_vel.t), getindex.(powered_vel.u, 3), color=:blue, linestyle=powered_style)
-
-
-    Legend(f[2,2], [zm, zam], [ "aero", "powered"], "Phase",
-        tellheight = false,
-        tellwidth = false,
-        margin = (5,5,5,5),
-        halign = :left, 
-        valign = :bottom)
-
-    b5 = Makie.Axis(f[1, 3], title="AoA (°)", limits=(nothing, (0.0,30.0)))
-    aoa_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.alpha)
-    aoa_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.alpha)
-    aoa_lim = sol_res(LinRange(0.0,1.0,200), idxs=1/tanh(Symbolics.scalarize(norm(ssys.veh.v)) + 1e-5) * (25.0))
-    Makie.lines!(b5, retimer.(unpowered_vel.t), aoa_unpowered.u, color="#56B4E9", linestyle=unpowered_style)
-    Makie.lines!(b5, retimer.(powered_vel.t), aoa_powered.u, color="#56B4E9",linestyle=powered_style)
-    Makie.lines!(b5, retimer.(aoa_lim.t), aoa_lim.u, color=:red,linestyle=:dash)
-
-    b5 = Makie.Axis(f[2, 3], title="Dynamic Pressure (Pa)")
-    q_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.q)
-    q_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.q)
-    Makie.lines!(b5, retimer.(unpowered_vel.t), q_unpowered.u, color="#E956B4", linestyle=unpowered_style)
-    Makie.lines!(b5, retimer.(powered_vel.t), q_powered.u, color="#E956B4",linestyle=powered_style)
-
-    b6 = Makie.Axis(f[3, 3], title="||ω||₂ (°/s)", xlabel="Time (s)")
-    ω_unpowered = sol_res(LinRange(0.0,0.5,10000), idxs=ssys.veh.ω)
-    ω_powered = sol_res(LinRange(0.5,1.0,10000), idxs=ssys.veh.ω)
-    zvm = Makie.lines!(b6, retimer.(ω_unpowered.t), rad2deg.(norm.(ω_unpowered.u)), color=:blue, linestyle=unpowered_style)
-    zvam = Makie.lines!(b6, retimer.(ω_powered.t), rad2deg.(norm.(ω_powered.u)), linestyle=powered_style, color=:blue)
-
-    b7 = Makie.Axis(f[1, 4], title="Lift command")
-    ua_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.ua)
-    ua_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.ua)
-    Makie.lines!(b7, retimer.(unpowered_vel.t), getindex.(ua_unpowered.u, 1), color=:red)
-    Makie.lines!(b7, retimer.(unpowered_vel.t), getindex.(ua_unpowered.u, 2), color=:green)
-    Makie.lines!(b7, retimer.(ua_powered.t), getindex.(ua_powered.u, 1), color=:red)
-    Makie.lines!(b7, retimer.(ua_powered.t), getindex.(ua_powered.u, 2), color=:green)
-
-    atref = sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.mach).t
-    ulim1 = upper_lim1_lut.(sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.mach), sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.alpha1), sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.alpha2))
-    llim1 = lower_lim1_lut.(sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.mach), sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.alpha1), sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.alpha2))
-    Makie.lines!(b7, retimer.(atref), collect(ulim1), color=:red, linestyle=:dash)
-    Makie.lines!(b7, retimer.(atref), collect((-).(llim1)), color=:red, linestyle=:dash)
-    ulim2 = upper_lim2_lut.(sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.mach), sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.alpha1), sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.alpha2))
-    llim2 = lower_lim2_lut.(sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.mach), sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.alpha1), sol_res(LinRange(0.0,1.0,100), idxs=ssys.veh.alpha2))
-    Makie.lines!(b7, retimer.(atref), collect(ulim2), color=:green, linestyle=:dash)
-    Makie.lines!(b7, retimer.(atref), collect((-).(llim2)), color=:green, linestyle=:dash)
-
-    b8 = Makie.Axis(f[2, 4], title="Aero acceleration (Inertial, m/s^2)")
-    caf_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.aero_force/ssys.veh.mp)
-    caf_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.aero_force/ssys.veh.mp)
-    zvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(caf_unpowered.u, 1), color=:red, linestyle=unpowered_style)
-    xvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(caf_unpowered.u, 2), color=:green, linestyle=unpowered_style)
-    xvm = Makie.lines!(b8, retimer.(unpowered_vel.t), getindex.(caf_unpowered.u, 3), color=:blue, linestyle=unpowered_style)
-    zvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(caf_powered.u, 1), color=:red, linestyle=powered_style)
-    xvam = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(caf_powered.u, 2), color=:green, linestyle=powered_style)
-    xvm = Makie.lines!(b8, retimer.(powered_vel.t), getindex.(caf_powered.u, 3), color=:blue, linestyle=powered_style)
-
-    b8 = Makie.Axis(f[3, 4], title="qα (Pa°)", xlabel="Time (s)")
-    qα_unpowered = sol_res(LinRange(0.0,0.5,100), idxs=ssys.veh.q * ssys.veh.alpha)
-    qα_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.q * ssys.veh.alpha)
-    zvm = Makie.lines!(b8, retimer.(unpowered_vel.t), qα_unpowered.u, color=:red, linestyle=unpowered_style)
-    zvam = Makie.lines!(b8, retimer.(powered_vel.t), qα_powered.u, color=:red, linestyle=powered_style)
-
-    b9 = Makie.Axis(f[1, 5], title="Norm thrust (% of max)", limits=(nothing, (0.0,1.2)))
-    u_powered = sol_res(LinRange(0.5,1.0,100), idxs=Symbolics.scalarize(norm(ssys.veh.u)))
-    zvm = Makie.lines!(b9, retimer.(powered_vel.t), getindex.(u_powered.u, 1))
-
-    b10 = Makie.Axis(f[2, 5], title="Acceleration from thrust (Body, m/s^2)")
-    th_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.th/(ssys.veh.mp))
-    zvm = Makie.lines!(b10, retimer.(powered_vel.t), getindex.(th_powered.u, 1), color=:red)
-    xvm = Makie.lines!(b10, retimer.(powered_vel.t), getindex.(th_powered.u, 2), color=:green)
-    yvm = Makie.lines!(b10, retimer.(powered_vel.t), getindex.(th_powered.u, 3), color=:blue)
-
-    b11 = Makie.Axis(f[3, 5], title="Fuel Mass (kg)", limits=(nothing,(0.0,12000)), xlabel="Time (s)")
-    m_powered = sol_res(LinRange(0.5,1.0,100), idxs=ssys.veh.mp - ssys.veh.mdry)
-    zvm = Makie.lines!(b11, retimer.(powered_vel.t), m_powered.u)
-    f
-end
 import CairoMakie
 save("sim.pdf", f; backend=CairoMakie, size=(1200,900))
 

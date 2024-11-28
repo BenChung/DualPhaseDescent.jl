@@ -64,7 +64,8 @@ setp(prb[:tsys], prb[:tsys].qmax)(prb[:pars], 8e4) # 80kPa, from real Falcon tra
 setp(prb[:tsys], prb[:tsys].qαmax)(prb[:pars], 1e6)
 
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
-u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100,tol=1e-5,r=64);
+u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100,tol=1e-3,r=16);
+    u_ref = copy(u[end])
 
 
 ignst = x[end][:,21]
@@ -165,7 +166,7 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
 
     function do_reachability_problem(prb_divert, ignpt, u, trajes=1)
         dirs = Vector{Float64}[]
-        pushed = Pair{Vector{Float64}, Vector{Float64}}[ignpt => u[end]]
+        pushed = Pair{Vector{Float64}, Tuple{Matrix{Float64}, Vector{Float64}}}[ignpt => (x[end],u[end])]
         chhists = [rch]
         src = [-1]
         times = []
@@ -186,16 +187,17 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
                 ph = quickhull(convert(Vector{Vector{Float64}}, first.(pushed)))
                 result = sample(ph.pts)
                 src_ind = findfirst(pr -> pr[1] ≈ result, pushed)
-                control_guess = last(pushed[src_ind])
+                (state_guess, control_guess) = last(pushed[src_ind])
                 result
             else 
                 src_ind = 1
+                state_guess = x[end]
                 control_guess = u[end]
                 ignpt
             end)
             try
-                up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16, tol=1e-3,
-                    initfun=(prb) -> default_iguess(prb; control_guess=control_guess));
+                up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=4, tol=1e-3,
+                    initfun=(prb) -> default_iguess(prb; control_guess=control_guess), uguess=control_guess);
                 propagated = propagate_sol(ssys, up)
                 if norm(propagated[ssys.veh.posp][end]) > 20 || maximum(abs.(whp[end])) > 1e-3
                     println("SOLN REJECT > tol")
@@ -204,7 +206,7 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
                     continue 
                 end
                 
-                push!(pushed, get_pos(xp[end][:,21]) => up[end])
+                push!(pushed, get_pos(xp[end][:,21]) => (xp[end], up[end]))
                 push!(src, src_ind)
                 push!(chhists, rchp)
                 push!(dirs, dir_rand)

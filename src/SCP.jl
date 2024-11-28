@@ -336,7 +336,7 @@ function default_iguess(prb; control_guess = nothing)
     return stack(steps)
 end
 
-function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wᵥ=1000, r = 8.0, tol=1e-5)
+function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wᵥ=1000, r = 8.0, tol=1e-5, uguess = nothing)
     ic = prb[:ic]
     tsys = prb[:tsys]
     l, y = prb[:avars]
@@ -354,7 +354,11 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
 
     tic = ModelingToolkit.varmap_to_vars(ic, unknowns(tsys); defaults=Dict([l => 0.0; Symbolics.scalarize(y .=> 0.0)]))
     xref = initfun(prb)
-    uref = tunable
+    if isnothing(uguess)
+        uref = tunable
+    else 
+        uref = uguess
+    end
     uhist = []
     xhist = []
     whist = []
@@ -383,12 +387,19 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
 
     postsolve = (model) -> nothing
     model = nothing
-    last_cost = Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
+    lin_err = res.value[1:end-1] .- reshape(xref[:, 2:N], :)
+    last_cost = Inf 
+    last_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]) # + nonlin_cst(res.value)
+    @show last_cost norm(lin_err, 1) abs(res.value[end]) get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]) 
+    #v= Inf #abs(res.value[end]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])
     #@show tic
+    
     iref_params,rmk,_ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
     for i=1:maxsteps
         model = Model(Clarabel.Optimizer)
-        set_optimizer_attribute(model, "verbose", false)
+        set_optimizer_attribute(model, "verbose", true)
+        set_optimizer_attribute(model, "presolve_enable", false)
+        set_optimizer_attribute(model, "chordal_decomposition_enable", false)
         @variable(model, δx[1:nunk,1:N])
         @variable(model, w[1:nunk,1:N-1])
         @variable(model, wl[1:ng,1:N])
@@ -448,7 +459,8 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
         #@show res_candidate.value[end]
         lin_err = actual .- reshape(xref_candidate[:, 2:N], :)
         #@show lin_err
-        actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + wₜ*sum(reshape(res_candidate.value[1:end-1], nunk, N-1)[2, :] .^ 2) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end]) + nonlin_cst(res_candidate.value)
+        #@show norm(lin_err, 1)
+        actual_cost = wₘ*norm(lin_err, 1) + wₙ*abs(res_candidate.value[end]) + get_cost(reshape(res_candidate.value[1:end-1], nunk, N-1)[:, end]) + nonlin_cst(res_candidate.value)
         push!(costs, est_cost)
         push!(rcosts, actual_cost)
         dk = last_cost - actual_cost

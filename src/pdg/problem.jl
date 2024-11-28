@@ -93,12 +93,20 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
                     pos = get_pos(symbolic_state)
                     @constraint(model, [tand(60)*pos[3], pos[1], pos[2]] in SecondOrderCone())
                 end
-                @variable(model, wfin[1:nunk])
+
+                final_dx = δx[:,end]
+                final_xref = xref[:, end]
+                tcvs = [get_omega(final_dx); get_R(final_dx); get_v(final_dx); get_pos(final_dx)]
+                tcref = [get_omega(final_xref); get_R(final_xref); get_v(final_xref); get_pos(final_xref)]
+                @variable(model, wfin[1:length(tcvs)])
+                MOI.add_constraint(model.moi_backend, MOI.VectorAffineFunction([addvec2terms(tcvs); addvec2terms(wfin)], tcref), MOI.Zeros(length(tcvs)))
+                #=
                 final_symbolic_state = symbolic_state[:,end] .+ wfin
                 @constraint(model, get_omega(final_symbolic_state) .== [0.0,0.0]) # omega
                 @constraint(model, get_R(final_symbolic_state) .== [0.0,0.0]) # R
                 @constraint(model, get_v(final_symbolic_state) .== [0.0,0.0,0.0]) # v
                 @constraint(model, get_pos(final_symbolic_state) .== [0.0,0,0.0]) # pos
+                =#
 
                 return custfun(model, δx, xref, symbolic_params, objexp + 0.5*sum(wfin.*wfin)*1000000)
             end

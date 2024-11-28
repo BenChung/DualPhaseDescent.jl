@@ -64,6 +64,7 @@ setp(prb[:tsys], prb[:tsys].qmax)(prb[:pars], 8e4) # 80kPa, from real Falcon tra
 setp(prb[:tsys], prb[:tsys].qαmax)(prb[:pars], 1e6)
 
 ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
+
 u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100,tol=1e-3,r=16);
     u_ref = copy(u[end])
 
@@ -162,7 +163,8 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
     setp(prb_divert[:tsys], prb_divert[:tsys].qαmax)(prb_divert[:pars], 1e6)
     
     ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb_divert; maxsteps=1);
-    @profview up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=16);
+    ifun = (_) -> x[end]
+    @profview up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=1, tol=1e-3, initfun=ifun, uguess=u[end]);
 
     function do_reachability_problem(prb_divert, ignpt, u, trajes=1)
         dirs = Vector{Float64}[]
@@ -177,7 +179,7 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
         ph = nothing
         tick()
         for i=1:trajes
-            println("====== $i $i $i $i $i ======")
+            println("====== $i $i $i $i $i $i $i $i $i $i $i $i $i $i $i ======")
             dir_rand = rand(3) - [0.5, 0.5, 0.5]
             dir_rand = dir_rand/norm(dir_rand)
             upd_pushdir(prb_divert[:pars], dir_rand)
@@ -196,8 +198,8 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
                 ignpt
             end)
             try
-                up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=50, r=4, tol=1e-3,
-                    initfun=(prb) -> default_iguess(prb; control_guess=control_guess), uguess=control_guess);
+                up,xp,whp,chp,rchp,dlhp,lnzp,unkp,tpp = do_trajopt(prb_divert; maxsteps=40, r=16, tol=1e-3,
+                    initfun=(prb) -> default_iguess(prb; control_guess=control_guess));
                 propagated = propagate_sol(ssys, up)
                 if norm(propagated[ssys.veh.posp][end]) > 20 || maximum(abs.(whp[end])) > 1e-3
                     println("SOLN REJECT > tol")
@@ -219,7 +221,7 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
         tock()
         return rejects, pushed, src, chhists, dirs, times, errors, rejected
     end
-    rejects, pushed, src, chhists, dirs, times, errors, rejected = do_reachability_problem(prb_divert, ignpt, u, 10);
+    @time rejects, pushed, src, chhists, dirs, times, errors, rejected = do_reachability_problem(prb_divert, ignpt, u, 100);
     rejects, pushed, src, chhists, dirs, times, errors, rejected = do_reachability_problem(prb_divert, ignpt, u, 10000);
     ph = quickhull(convert(Vector{Vector{Float64}}, first.(pushed)))
 
@@ -227,7 +229,7 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
     using CairoMakie
     include("trajplots.jl")
 
-    save("spbm_convplot.pdf", spbm_convplot(chhists); size=(400,400))e
+    save("spbm_convplot.pdf", spbm_convplot(chhists); size=(400,400))
 
     save("reachable.pdf", plot_polytope(sol_ws, pushed, ph); backend=CairoMakie, size=(900,900))
 

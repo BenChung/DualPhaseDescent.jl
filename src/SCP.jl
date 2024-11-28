@@ -336,6 +336,8 @@ function default_iguess(prb; control_guess = nothing)
     return stack(steps)
 end
 
+addvec2terms(v, cst=1.0) = map(((i,v),) -> MOI.VectorAffineTerm(i, MOI.ScalarAffineTerm(cst, v.index)), enumerate(v)) # adds .+ cst * v
+
 function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=50, wₜ=100, wᵥ=1000, r = 8.0, tol=1e-5, uguess = nothing)
     ic = prb[:ic]
     tsys = prb[:tsys]
@@ -397,7 +399,7 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
     iref_params,rmk,_ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
     for i=1:maxsteps
         model = Model(Clarabel.Optimizer)
-        set_optimizer_attribute(model, "verbose", true)
+        set_optimizer_attribute(model, "verbose", false)
         set_optimizer_attribute(model, "presolve_enable", false)
         set_optimizer_attribute(model, "chordal_decomposition_enable", false)
         @variable(model, δx[1:nunk,1:N])
@@ -405,17 +407,39 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
         @variable(model, wl[1:ng,1:N])
         @variable(model, δu[1:nparams])
         @variable(model, tc_lin)
-        @constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .== rd * [reshape(δx[:, 1:N], :); δu] .+ rv .- [reshape(xref[:, 2:N], :); 0])
-        @constraint(model, reshape(δx[:, 1], :) .== tic .- reshape(xref[:, 1], :))
+
+
+        #@constraint(model, [reshape(δx[:, 2:N], :) .+ reshape(w, :); tc_lin] .- rd * [reshape(δx[:, 1:N], :); δu] .- rv .+ [reshape(xref[:, 2:N], :); 0] .== 0)
+        dstate = [reshape(δx[:, 1:N], :); δu]
+        delnext = [reshape(δx[:, 2:N], :); tc_lin]
+        (I,J,_) = findnz(prb[:jac_sparsity])
+        nxt = addvec2terms(delnext) 
+        slk = addvec2terms(reshape(w, :))
+        lnz_upd = map((row,col) -> MOI.VectorAffineTerm(row, MOI.ScalarAffineTerm(-rd[row, col], dstate[col].index)), I, J)
+        MOI.add_constraint(model.moi_backend, MOI.VectorAffineFunction([nxt; slk; lnz_upd], [reshape(xref[:, 2:N], :); 0] .- rv), MOI.Zeros(length(rv)))
+
+        #@constraint(model, reshape(δx[:, 1], :) .- tic .+ reshape(xref[:, 1], :) .== 0)
+        MOI.add_constraint(model.moi_backend, MOI.VectorAffineFunction(
+            addvec2terms(reshape(δx[:, 1], :)), reshape(xref[:, 1], :) .- tic), 
+            MOI.Zeros(length(tic)))
+
         #@constraint(model, reshape(δx[3:6, end], :) .== [0.0, 0.0, 1.0, 1.0] .- reshape(xref[3:6, end], :))
-        # TODO
+        non_dils = [i for i ∈ 1:nparams if !(dil !== nothing && i < length(dil) && dil[i])]
+        MOI.add_constraint(model.moi_backend, 
+            MOI.VectorAffineFunction(addvec2terms(δu[non_dils]), uref[non_dils] .- 1.0), 
+            MOI.Nonpositives(length(non_dils)))
+        MOI.add_constraint(model.moi_backend, 
+            MOI.VectorAffineFunction(addvec2terms(δu[non_dils]), uref[non_dils] .+ 1.0), 
+            MOI.Nonnegatives(length(non_dils)))
+            #=
         for i=1:nparams
             if dil !== nothing && i < length(dil) && dil[i]
                 continue 
             end
-            @constraint(model, δu[i] + uref[i] <= 1.0)
-            @constraint(model, -1.0 <= δu[i] + uref[i])
+            @constraint(model, δu[i] + uref[i] - 1.0 <= 0)
+            @constraint(model, δu[i] + uref[i] + 1.0 >= 0.0)
         end
+        =#
 
         @variable(model, μ)
         @variable(model, ν >= 0)
@@ -430,19 +454,58 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
             objective_expr, cvx_cst_est, nonlin_cst, postsolve = convex_cstr_fun(model, δx, xref, symbolic_params, objective_expr)
         end
         
-        @constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
+        #@constraint(model, [μ; reshape(w, :)] ∈ MOI.NormOneCone(length(reshape(w, :)) + 1))
+        wflat = reshape(w, :)
+        @variable(model, w_bnds[1:length(wflat)])
+        # @constraint(model, w_bnds .>= 0.0)
+        MOI.add_constraint(model.moi_backend, 
+            MOI.VectorAffineFunction(addvec2terms(w_bnds), zeros(length(wflat))), 
+            MOI.Nonnegatives(length(wflat)))
+        # @constraint(model, wflat .<= w_bnds)
+        MOI.add_constraint(model.moi_backend, 
+            MOI.VectorAffineFunction([addvec2terms(wflat); addvec2terms(w_bnds, -1.0)], zeros(length(wflat))), 
+            MOI.Nonpositives(length(wflat)))
+        # @constraint(model, wflat .>= -w_bnds)
+        MOI.add_constraint(model.moi_backend, 
+            MOI.VectorAffineFunction([addvec2terms(wflat); addvec2terms(w_bnds)], zeros(length(wflat))), 
+            MOI.Nonnegatives(length(wflat)))
+        # @constraint(model, μ == sum(w_bnds))
+        MOI.add_constraint(model.moi_backend, 
+            MOI.VectorAffineFunction([
+                [MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, v.index)) for v in w_bnds]; 
+                MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(-1.0, μ.index))], [0.0]), 
+            MOI.Zeros(1))
+
         
         for i=1:N
-            @constraint(model, get_y(δx[:,i] .+ xref[:,i]) .+ wl[:,i] .== 0)
+            # @constraint(model, get_y(δx[:,i] .+ xref[:,i]) .+ wl[:,i] .== 0)
+            MOI.add_constraint(model.moi_backend, 
+                MOI.VectorAffineFunction([addvec2terms(get_y(δx[:,i])); addvec2terms(wl[:,i])], get_y(xref[:,i])), 
+                MOI.Zeros(ng))
         end
         
         #=
         @variable(model, ηₙ) # terminal constraint trust region
         @constraint(model, [ηₙ; 1.0; tc_lin - res.value[end]] ∈ MOI.RotatedSecondOrderCone(3))
 =#
-        @constraint(model, [ν; tc_lin] ∈ MOI.NormOneCone(2))
+        # @constraint(model, [ν; tc_lin] ∈ MOI.NormOneCone(2))
+        @variable(model, tc_bnd)
+        MOI.add_constraint(model.moi_backend,
+            MOI.VectorAffineFunction([
+                MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(-1.0, tc_bnd.index)),
+                MOI.VectorAffineTerm(2, MOI.ScalarAffineTerm(-1.0, tc_bnd.index)),
+                MOI.VectorAffineTerm(2, MOI.ScalarAffineTerm(1.0, ν.index)),
+                MOI.VectorAffineTerm(3, MOI.ScalarAffineTerm(-1.0, tc_bnd.index)),
+                MOI.VectorAffineTerm(3, MOI.ScalarAffineTerm(-1.0, ν.index))
+            ], zeros(3)), MOI.Nonpositives(3))
+        
 
-        @constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
+        #@constraint(model, L == get_cost(δx[:, N]) + get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end]))
+        MOI.add_constraint(model.moi_backend,
+            MOI.VectorAffineFunction([
+                MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(-1.0, get_cost(δx[:, N]).index)),
+                MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, L.index))
+            ], [-get_cost(reshape(res.value[1:end-1], nunk, N-1)[:, end])]), MOI.Zeros(1))
         @objective(model, Min, objective_expr)
         optimize!(model)
         #@show objective_value(model)

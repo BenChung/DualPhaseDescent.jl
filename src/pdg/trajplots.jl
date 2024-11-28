@@ -51,8 +51,8 @@ function spbm_convplot(chhists)
         xlabel="Subproblem iteration count", 
         ylabel="Converged in < iters",
         ytickformat=labs->["$(round(Int, l*100))%" for l in labs],
-        xticks=0:5:50)
-    Makie.lines!(ax,[(length(hist_lens) - sum(hist_lens .> i))/(length(hist_lens)+rejected+errors) for i=1:50])
+        xticks=0:5:40)
+    Makie.lines!(ax,[(length(hist_lens) - sum(hist_lens .> i))/(length(hist_lens)+rejected+errors) for i=1:40])
     return f
 end
 
@@ -72,7 +72,7 @@ function plot_polytope(sol_ws, pushed, ph)
     minE = findmin(p->p[1][2], pushed)
     maxU = findmax(p->p[1][3], pushed)
     minU = findmin(p->p[1][3], pushed)
-    sols = propagate_sol.((ssys,), map(x->[last(x)], getindex.((pushed,), last.([maxN, minN, maxE, minE, maxU, minU]))));
+    sols = propagate_sol.((ssys,), map(x->[last(x)[2]], getindex.((pushed,), last.([maxN, minN, maxE, minE, maxU, minU]))));
 
     function plot_onto_axis(ax, idx, sols)
         for soln in sols 

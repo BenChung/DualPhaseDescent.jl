@@ -43,6 +43,42 @@ function make_convergence_plot(sol_ws, pushed) # danger! slow!
     #save("reachability-convergence.pdf", f; size=(400,400))
 end
 
+function expansion_trajectories(pushed, sol_ws, ph)
+    scalefactor = sol_ws.ps[ssys.veh.ρpos]
+    function plotroute(ax, proj, start)
+        route = []
+        current = start
+        iters = 1
+        while iters < 100
+            push!(route, current)
+            if current == 1 
+                break 
+            end
+            current = src[current]
+            iters += 1
+        end
+        pts = Point2.(proj.(map(x->x .* scalefactor, first.(pushed[route]))))
+        dirs = -(pts[2:end] - pts[1:end-1])
+        arrows!(ax, pts[2:end], dirs - dirs ./ norm.(dirs) * 42)
+        scatter!(ax, pts)
+    end
+    f = Figure()
+    nuvec(v) = v[[1,3]]
+    ax = Makie.Axis(f[1,1], xlabel="N (m)", ylabel="U (m)")
+    polypts = [scalefactor .* p for p in ph.pts[ph.vertices]]
+    projhull = quickhull(getindex.(polypts, ([1,3],)))
+    bdry = [(Point2(projhull.pts[pr[1]]), Point2(projhull.pts[pr[2]])) for pr in facets(projhull)]
+    Makie.linesegments!(ax, bdry)
+
+    plotroute(ax, nuvec, findmin(p->p[1][1], pushed)[2])
+    plotroute(ax, nuvec, findmax(p->p[1][1], pushed)[2])
+    plotroute(ax, nuvec, findmin(p->p[1][3], pushed)[2])
+    plotroute(ax, nuvec, findmax(p->p[1][3], pushed)[2])
+    
+    scatter!(ax, Point2.(nuvec.([scalefactor .* pushed[1][1]])), color=:red)
+    f
+end
+
 function spbm_convplot(chhists)
     
     hist_lens = length.(chhists)

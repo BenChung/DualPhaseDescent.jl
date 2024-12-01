@@ -233,8 +233,15 @@ prb_divert = descentproblem(probsys, sol_ws, ssys;
 
     save("reachable.pdf", plot_polytope(sol_ws, pushed, ph); backend=CairoMakie, size=(900,900))
 
+    save("running_time_dist.pdf", hist(times[2:end] - times[1:end-1], bins=200, axis=(xticks=0:9,xlabel="Running time (s)", ylabel="Subproblems")); size=(400,400))
+    g = make_convergence_plot(sol_ws, pushed)
 
-    
+    save("expansion_trajectories.pdf", expansion_trajectories(pushed, sol_ws, ph); size=(400,400))
+    save("reachability-convergence.pdf", g; size=(400,400))
+
+
+
+
 sol_res = propagate_sol(ssys, u)
 sol_res = propagate_sol(ssys, [pushed[461][2]])
 f = plot_soln(sol_res)

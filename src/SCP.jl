@@ -265,6 +265,7 @@ function trajopt(
         dx = dx_ref,
         colorvec = colorvec,
         sparsity = sparsity_pattern)
+    jac = zeros(nunk * (N-1) + 1, length(iguess[:, 1:N]) + length(tunable))
     function linearize(states, pars)
 #=
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
@@ -273,9 +274,8 @@ function trajopt(
         res = DiffResults.JacobianResult(zeros(nunk * (N-1) + 1), linpoint);
         ForwardDiff.jacobian!(res, lnz(adaptive=false, dt=0.0001), linpoint)
 =#
-        
+        jac .= zero(eltype(jac))
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
-        jac = zeros(nunk * (N-1) + 1, length(linpoint))
         forwarddiff_color_jacobian!(jac, jacfun, linpoint, cache)
         return (value=ForwardDiff.value(cache), derivs=(jac, ))
         #=

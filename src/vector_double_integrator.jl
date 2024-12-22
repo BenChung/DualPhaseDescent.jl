@@ -31,18 +31,7 @@ end
 
 sys = build_example_problem()
 
-import RuntimeGeneratedFunctions
-function (f::RuntimeGeneratedFunctions.RuntimeGeneratedFunction{argnames, cache_tag, context_tag, id})(args::Vararg{Any, N}) where {N, argnames, cache_tag, context_tag, id}
-    try
-        RuntimeGeneratedFunctions.generated_callfunc(f, args...)
-    catch e 
-        @error "Caught error in RuntimeGeneratedFunction; source code follows"
-        func_expr = Expr(:->, Expr(:tuple, argnames...), RuntimeGeneratedFunctions._lookup_body(cache_tag, id))
-        @show func_expr
-        rethrow(e)
-    end
-end
-u,x,wh,ch,rch,dlh,lnz = trajopt(sys, (0.0, 1.0), 20, 
+prb = trajopt(sys, (0.0, 1.0), 20, 
     Dict(sys.dblint.m => 1.0, sys.dblint.τ => 1.0), 
     Dict(
         sys.dblint.x[1] => collect(LinRange(0.0, 1.0, 20)), 
@@ -58,7 +47,7 @@ u,x,wh,ch,rch,dlh,lnz = trajopt(sys, (0.0, 1.0), 20,
      sys.dblint.x[3] => 0.0, 
      sys.dblint.v[3] => 0.0], 
     sum([sys.dblint.f[1], sys.dblint.f[2], sys.dblint.f[3]].^2), 0.0, 
-    0.0, 0.0, 
+    [0.0], 0.0, 
     ((sum((sys.dblint.v).^2))) + ((sum((sys.dblint.x .- 1) .^2))));
 
 using Makie, GLMakie

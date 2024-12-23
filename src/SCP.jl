@@ -1,10 +1,11 @@
 #module SCP
 using LinearAlgebra
-using OrdinaryDiffEq
+using OrdinaryDiffEqCore, OrdinaryDiffEqTsit5
 using ModelingToolkit, Symbolics, Setfield
 using SciMLSensitivity, SymbolicIndexingInterface, SciMLStructures, IntervalSets
 using ForwardDiff, ComponentArrays, DiffResults, RuntimeGeneratedFunctions
 using JuMP, Clarabel
+using SparseArrays
 import MathOptInterface as MOI
 
 using SparseConnectivityTracer, SparseDiffTools

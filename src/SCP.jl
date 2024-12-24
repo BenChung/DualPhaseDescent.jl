@@ -29,6 +29,13 @@ function reltime(x, default = (-Inf,Inf))
     Symbolics.getmetadata(x, RelevantTime, default)
 end
 
+struct HasContinuity end 
+Symbolics.option_to_metadata_type(::Val{:continuity}) = HasContinuity
+function hascontinuity(x, default = true)
+    p = Symbolics.getparent(x, nothing)
+    p === nothing || (x = p)
+    Symbolics.getmetadata(x, HasContinuity, default)
+end
 
 
 function ModelingToolkitStandardLibrary.Blocks.linear_interpolation(x1::SparseConnectivityTracer.GradientTracer, x2::Real, t1::Real, t2::Real, t)
@@ -185,7 +192,7 @@ function trajopt(
     @show ng
     augmenting_vars = ModelingToolkit.@variables begin
         l(t)=0
-        y(t)[1:ng]=0
+        y(t)[1:ng]=0, [continuity = false]
     end
     eqs = [
         D(l) ~ running_cost;
@@ -222,7 +229,9 @@ function trajopt(
     
     params = parameter_values(base_prob)
     tunable, repack, _ = SciMLStructures.canonicalize(SciMLStructures.Tunable(), params)
-    upd_start = setu(tsys, unknowns(tsys))
+    continuity_states = filter(hascontinuity, unknowns(tsys))
+    get_continous_states = getu(tsys, continuity_states)
+    upd_start = setu(tsys, continuity_states)
 
     tparams = tunable_parameters(tsys)
     dil = isdilation.(tparams)
@@ -233,7 +242,7 @@ function trajopt(
             params_ = SciMLStructures.replace(SciMLStructures.Tunable(), params, inp.params)
             function segment(prob, i, repeat)
                 nu0 = neltype.(prob.u0)
-                upd_start(nu0, inp.u0[:, i])
+                upd_start(nu0, get_continous_states(inp.u0[:, i]))
                 return remake(prob, u0=nu0, p=params_, tspan=((i-1)/(N-1), (i)/(N-1)) .* dtime .+ ti)
             end
             ensemble = EnsembleProblem(base_prob, prob_func=segment, safetycopy=false)

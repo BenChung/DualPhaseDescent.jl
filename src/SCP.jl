@@ -1,4 +1,4 @@
-#module SCP
+module SCP
 using LinearAlgebra
 using OrdinaryDiffEqCore, OrdinaryDiffEqTsit5
 using ModelingToolkit, Symbolics, Setfield
@@ -589,4 +589,5 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
 
 
     return (uhist, xhist, whist, costs, rcosts, delta_lin_hist, linearize, unknowns(tsys), tunable_parameters(tsys))
+end
 end

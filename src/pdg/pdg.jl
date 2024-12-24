@@ -68,6 +68,10 @@ ui,xi,_,_,_,_,_,unk,_ = do_trajopt(prb; maxsteps=1);
 u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100,tol=1e-3,r=16);
     u_ref = copy(u[end])
 
+prb[:ic][2] = prb[:ic][2][1] => [500.0,2500.0,14900.0] ./ pos_scale
+ig=(prb) -> x[end]
+@time do_trajopt(prb; maxsteps=100,tol=1e-3,r=4,initfun=ig, uguess=u[end]);
+
 
 ignst = x[end][:,21]
 get_pos = getu(prb[:tsys], prb[:tsys].model.veh.pos)

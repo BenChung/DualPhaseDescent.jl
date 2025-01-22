@@ -57,7 +57,7 @@ function descentproblem(probsys, sol, solsys; cvx_mod=s->(_, _, _, _, p)->(p, ()
             max(sqmax*probsys.veh.q - sqmax*qmax, 0), 
             sqαmax*max(probsys.veh.q * probsys.veh.alpha - qαmax, 0)
         ], #0.0, # todo: alpha_max_aero (probsys.veh.alpha - 25.0)/50 - need to do expanded dynamics for the pdg phase
-        Symbolics.scalarize(sum((probsys.veh.pos .* pos_scale/100).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale .- R_final) .^2)),
+        Symbolics.scalarize(sum((probsys.veh.pos .* pos_scale/100).^2) + ((sum((vel_scale[1:3] .* probsys.veh.v[1:3]).^2))) + sum((probsys.veh.ω) .^2) + sum((probsys.veh.R .* R_scale) .^2)),
         (tsys) -> begin 
             get_pos = getu(tsys, tsys.model.veh.pos)
             get_omega = getu(tsys, tsys.model.veh.ω)

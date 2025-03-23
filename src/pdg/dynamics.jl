@@ -8,6 +8,9 @@ using Interpolations
 using ISAtmosphere
 using LinearAlgebra
 
+
+include("parasol.jl")
+
 body_data = CSV.read("src/kerbal/body_fit.csv", DataFrame)
 body_data = sort(sort(body_data, order(:mach)), order(:aoa_net))
 function make_interp(field)
@@ -244,8 +247,9 @@ function make_vehicle(;
     Symbolics.@variables lift_dir(t)[1:3] local_wind_vec(t)[1:3] alpha(t) accel(t)[1:3]
     Symbolics.@variables fin_force(t)[1:4, 1:3] fin1_force(t)[1:3] fin2_force(t)[1:3] fin3_force(t)[1:3] fin4_force(t)[1:3] τc(t) ρᵣ(t)
     Symbolics.@variables u(t)[1:3] kerbin_rel(t)[1:3] spherical_alt(t) temp(t) mach(t) Cd(t) Cl(t) Cm(t) aero_force(t)[1:3] vel_dir(t)[1:3] q(t)
-    Symbolics.@variables ua(t)[1:2] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
+    Symbolics.@variables ua(t)[1:3] aero_ctrl_lift(t)[1:2] lift_dir1(t)[1:3] lift_dir2(t)[1:3] aero_ctrl_drag(t) aero_ctrl_force(t)[1:3] body_torque(t)[1:3] ctrl_torque(t)[1:3]
     Symbolics.@variables τc(t) acc(t)[1:3] centrifugal_accel(t)[1:3] coriolis_accel(t)[1:3] g_accel(t)[1:3] earth_equiv_alt(t) lift_force_dir2(t)[1:3]
+    Symbolics.@variables Cv(t)[1:3] Dv(t)[1:3] k1(t) k2(t) lift_scale(t) c(t)[1:3] cmd_torque(t)[1:3] tref(t)
     @parameters τa [tunable = true, dilation=true] τp [tunable=true, dilation=true]
     
     eqns = expand_derivatives.([
@@ -272,15 +276,31 @@ function make_vehicle(;
         Cl ~ body_lift_lookup(mach, alpha)
         Cm ~ body_torq_lookup(mach, alpha)
 
-        Symbolics.scalarize(aero_ctrl_lift .~ ua .* sum(vp .^ 2) .* act_scale_lookup(mach))
+        lift_scale ~ Symbolics.scalarize(sum(vp .^ 2)) .* act_scale_lookup(mach)
+        #=
+        Symbolics.scalarize(aero_ctrl_lift .~ ua .* lift_scale)
         aero_ctrl_drag ~ 
             act_lin_lookup(mach) * sum([cosd(alpha2), cosd(alpha1)] .* aero_ctrl_lift.^2) +
             act_const_lookup(mach) * sum(aero_ctrl_lift.^2)
+            =#
         Symbolics.scalarize(vel_dir .~ normalize_vec(vp))
+        # lookat_rmat([0,0,-1],Symbolics.scalarize(vel_dir)) = Rwi
+        # rquat(Rp) * lookat_rmat(Symbolics.scalarize(vel_dir), [0,0,-1]) = Rbi * Riw = Rbw
         Symbolics.scalarize(lift_dir1 .~ lookat_rmat([0,0,-1],Symbolics.scalarize(vel_dir)) * [1,0,0])
         Symbolics.scalarize(lift_dir2 .~ lookat_rmat([0,0,-1],Symbolics.scalarize(vel_dir)) * [0,1,0])
-        Symbolics.scalarize(lift_force_dir2 .~ normalize_vec([dot(rquat(Rp)*[0,1,0], lift_dir1), dot(rquat(Rp)*[0,1,0], lift_dir2), 0.0]))
-        Symbolics.scalarize(aero_ctrl_force .~ 1000 * (lift_dir1 .* aero_ctrl_lift[1] .+ lift_dir2 .* aero_ctrl_lift[2] .- aero_ctrl_drag * v/norm(v)))
+        # Symbolics.scalarize(lift_force_dir2 .~ normalize_vec([dot(rquat(Rp)*[0,1,0], lift_dir1), dot(rquat(Rp)*[0,1,0], lift_dir2), 0.0]))
+        # Symbolics.scalarize(aero_ctrl_force .~ 1000 * (lift_dir1 .* aero_ctrl_lift[1] .+ lift_dir2 .* aero_ctrl_lift[2] .- aero_ctrl_drag * v/norm(v)))
+        # Symbolics.scalarize(ctrl_torque .~ cross(iquat(Rp) * Symbolics.scalarize(aero_ctrl_force), fin_offset))
+        
+        Symbolics.scalarize(c .~ (cmd_torque .* 1e5) - body_torque)
+        Symbolics.scalarize(Cv .~ -1.0/(dot(fin_offset, fin_offset) * 1000 * lift_scale) .* (rquat(Rp) * lookat_rmat(Symbolics.scalarize(vel_dir), [0,0,-1]) * cross(c, fin_offset)))
+        Symbolics.scalarize(Dv .~ rquat(Rp) * Symbolics.scalarize(lookat_rmat(Symbolics.scalarize(vel_dir), [0,0,-1]) * fin_offset) / (1000 * lift_scale))
+        k1 ~ (act_lin_lookup(mach) * cosd(alpha2) + act_const_lookup(mach)) * lift_scale
+        k2 ~ (act_lin_lookup(mach) * cosd(alpha1) + act_const_lookup(mach)) * lift_scale
+         # solve the NDI
+        Symbolics.scalarize(ua .~ Cv + Dv * tref)
+        Symbolics.scalarize(aero_ctrl_force .~ lookat_rmat([0,0,-1],Symbolics.scalarize(vel_dir)) * ua *lift_scale*1000)
+
         
         aero_force .~ Symbolics.scalarize(
             Cl .* ρᵣ .* 1000 .* (cross(vp, cross(rquat(Rp) * [0,0,-1],vp)))
@@ -288,14 +308,13 @@ function make_vehicle(;
             .+ ρᵣ *aero_ctrl_force) # Cl/Cd come out in kN 
 
         Symbolics.scalarize(body_torque .~ Cm * 1000 * cross([0,0,-1], iquat(Rp) * Symbolics.scalarize(vp)) * norm(vp))
-        Symbolics.scalarize(ctrl_torque .~ cross(iquat(Rp) * Symbolics.scalarize(aero_ctrl_force), fin_offset))
 
         propellant_fraction ~ (mp - mdry)/fuel_mass
         iJz .~ iJz_dry + iJz_delta * propellant_fraction;
         τc ~ ρτ*ifelse(t >= 0.5, τp, τa)
         th .~ u * thmax
         D(ρm * m) ~ -τc*sqrt_smooth(max(sum(th.^2), 0.0))/(ISP * 9.8); 
-        net_torque .~ cross(th, engine_offset) .+ ρᵣ * (ctrl_torque .+ body_torque); # .+ Jz * rquat(Rp)*10*ωp; # TODO: change 50
+        net_torque .~ cross(th, engine_offset) .+ ρᵣ * cmd_torque; # .+ Jz * rquat(Rp)*10*ωp; # TODO: change 50
         D.(ρω.*ω) .~ -τc.*collect((Symbolics.scalarize(iquat(Rp) * Symbolics.scalarize(iJz .* net_torque)))[1:2] .+ 10*ωp);
         D.(ρR.*R) .~ τc.*Rotations.kinematics(rquat(Rp), Symbolics.scalarize(ωp));
 
@@ -306,7 +325,7 @@ function make_vehicle(;
         Symbolics.scalarize(D.(ρv.*v) .~ τc.*acc);
         Symbolics.scalarize(D.(ρpos.*pos) .~ τc.*(vp));
     ])
-    return ODESystem(expand_derivatives.(Symbolics.scalarize.(eqns)), t; name = name)
+    return ODESystem(expand_derivatives.([Symbolics.scalarize.(eqns); tref ~ parasol(Cv, Dv, 0.0, k1, k2)]), t; name = name)
 end
 
 function build_example_problem()
@@ -322,8 +341,9 @@ function build_example_problem()
         veh.u[1] ~ inputx.output.u, 
         veh.u[2] ~ inputy.output.u, 
         veh.u[3] ~ inputz.output.u,
-        veh.ua[1] ~ input_fin1.output.u,
-        veh.ua[2] ~ input_fin2.output.u], t,
+        veh.cmd_torque[1] ~ input_fin1.output.u,
+        veh.cmd_torque[2] ~ input_fin2.output.u,
+        veh.cmd_torque[3] ~ 0.0], t,
         systems = [veh, input_fin1, input_fin2, inputx, inputy, inputz])
     return model # structural_simplify(model)
 end

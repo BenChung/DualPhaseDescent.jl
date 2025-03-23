@@ -12,7 +12,7 @@ using Polyhedra
 probsys = build_example_problem()
 ssys = structural_simplify(probsys)
 
-function solve_single_shot(
+function solve_single_shot(ssys = ssys,
     pos_init = [500.0,2500.0,15000.0],
     vel_init = [0,-150,-350],
     R_init = [-deg2rad(atand(150,350)),0],
@@ -35,8 +35,6 @@ function solve_single_shot(
         ssys.veh.R => R_init ./ R_scale
         ssys.veh.pos => pos_init ./ pos_scale
         ssys.veh.v => vel_init ./ vel_scale
-        ssys.veh.τa => 40.0/10
-        ssys.veh.τp => 40.0/10
     ], (0.0, 1.0), [
         ssys.veh.ρv => vel_scale
         ssys.veh.ρpos => pos_scale
@@ -44,6 +42,8 @@ function solve_single_shot(
         ssys.input_fin1.vals => 0.0*ones(20)
         ssys.input_fin2.vals => -0.0*ones(20) # 0.0*ones(20) #
         ssys.inputz.vals => 0.0 * ones(20)
+        ssys.veh.τa => 40.0/10
+        ssys.veh.τp => 40.0/10
     ])
     sol = solve(prob, Tsit5(); dtmax=0.0001)
 
@@ -65,7 +65,7 @@ function solve_single_shot(
     setp(prb[:tsys], prb[:tsys].qmax)(prb[:pars], 8e4) # 80kPa, from real Falcon trajes
     setp(prb[:tsys], prb[:tsys].qαmax)(prb[:pars], 1e6)
 
-    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100,tol=1e-3,r=1);
+    u,x,wh,ch,rch,dlh,lnz,unk,tp = do_trajopt(prb; maxsteps=100,tol=1e-3,r=0.01);
     return u,x,wh,ch,rch,dlh,lnz,unk,tp
 end
 
@@ -87,6 +87,8 @@ function propagate_sol(ssys, u, tp;
     vel_scale = [100.0,100.0,100.0]
     ω_scale = [1.0,1.0]
     m_scale = 10516.0
+    idxs = [0; accumulate(+, map(x -> if length(x) >= 1 x[1] else 1 end, Symbolics.size.(tp)))]
+    rgns = denamespace.((ssys, ), tp) .=> map(x->if length(x) == 1 x[1] else x end, map((a,b) -> u[end][a+1:b], idxs[1:end-1], idxs[2:end]))
     prob_res = ODEProblem(ssys, [
         veh.m => m_init / m_scale
         veh.ω => ω_init
@@ -97,14 +99,7 @@ function propagate_sol(ssys, u, tp;
         veh.ρv => vel_scale;
         veh.ρpos => pos_scale;
         veh.ρm => m_scale;
-        denamespace.((ssys, ), tp) .=> [
-            u[end][1], #10*u[end][1], 
-            u[end][2], 
-            u[end][3:22], 
-            u[end][23:42], 
-            u[end][43:62], 
-            u[end][63:82], 
-            u[end][83:102]]
+        rgns
     ])
     return solve(prob_res, Tsit5())
 end

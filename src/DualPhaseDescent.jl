@@ -234,7 +234,8 @@ function trajopt(
     upd_start = setu(tsys, continuity_states)
 
     tparams = tunable_parameters(tsys)
-    dil = isdilation.(tparams)
+    dil = collect(Iterators.flatten([[isdilation(param) for i in 1:length(param)] for param in tparams]))
+    @show length(dil) length(tunable)
 
     function lnz(;opts...)
         return function (inp)
@@ -255,6 +256,7 @@ function trajopt(
         end
     end
     linearize(inp) = lnz()(inp)
+    display(base_prob.f.f.f_iip)
 
 
     function sparsity_linearize(states, pars)
@@ -277,36 +279,10 @@ function trajopt(
         sparsity = sparsity_pattern)
     jac = zeros(nunk * (N-1) + 1, length(iguess[:, 1:N]) + length(tunable))
     function linearize(states, pars)
-#=
-        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
-        value = collect(linearize(linpoint))
-        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
-        res = DiffResults.JacobianResult(zeros(nunk * (N-1) + 1), linpoint);
-        ForwardDiff.jacobian!(res, lnz(adaptive=false, dt=0.0001), linpoint)
-=#
         jac .= zero(eltype(jac))
         linpoint = ComponentArray(u0=collect(states), params=collect(pars))
         forwarddiff_color_jacobian!(jac, jacfun, linpoint, cache)
         return (value=ForwardDiff.value(cache), derivs=(jac, ))
-        #=
-        global value_sparse = 
-        global value_sparse_tryme = collect(dx_ref)
-        global value_dense = res.value
-        global result_sparse = jac
-        global result_dense = res.derivs[1]
-        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
-        value2 = collect(linearize(linpoint))
-        linpoint = ComponentArray(u0=collect(states), params=collect(pars))
-        jac = forwarddiff_color_jacobian(lnz(), linpoint, colorvec = colorvec, sparsity=sparsity_pattern)
-        global result_sparse = jac
-        global result_dense = res.derivs[1]
-
-        global value_dense = res.value
-        global value_sparse = value
-        global value_sparse2 = value2
-        =#
-        
-        #return (value=value, derivs=(jac, ))
     end
 
     return Dict(
@@ -434,7 +410,7 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
             MOI.Zeros(length(tic)))
 
         #@constraint(model, reshape(δx[3:6, end], :) .== [0.0, 0.0, 1.0, 1.0] .- reshape(xref[3:6, end], :))
-        non_dils = [i for i ∈ 1:nparams if !(dil !== nothing && i < length(dil) && dil[i])]
+        non_dils = (1:nparams)[(!).(dil)]
         MOI.add_constraint(model.moi_backend, 
             MOI.VectorAffineFunction(addvec2terms(δu[non_dils]), uref[non_dils] .- 1.0), 
             MOI.Nonpositives(length(non_dils)))
@@ -460,7 +436,7 @@ function do_trajopt(prb; initfun=default_iguess, maxsteps=300, wₘ=1000, wₙ=5
         cvx_cst_est = () -> 0.0
         nonlin_cst = (_) -> 0.0
         if !isnothing(convex_cstr_fun)
-            symbolic_params = rmk(δu .+ uref)
+            symbolic_params = SciMLStructures.replace(SciMLStructures.Tunable(), params, δu .+ uref)
             objective_expr, cvx_cst_est, nonlin_cst, postsolve = convex_cstr_fun(model, δx, xref, symbolic_params, objective_expr)
         end
         
